@@ -39,7 +39,18 @@ func (m *MockOllamaClient) ShowModel(ctx context.Context, name string) (*ollama.
 }
 
 func (m *MockOllamaClient) PullModel(ctx context.Context, name string, progressFn func(ollama.PullProgress)) error {
-	return m.err
+	if m.err != nil {
+		return m.err
+	}
+	// Simulate progress callback
+	if progressFn != nil {
+		progressFn(ollama.PullProgress{
+			Status:    "downloading",
+			Completed: 50,
+			Total:     100,
+		})
+	}
+	return nil
 }
 
 func (m *MockOllamaClient) DeleteModel(ctx context.Context, name string) error {
@@ -47,7 +58,11 @@ func (m *MockOllamaClient) DeleteModel(ctx context.Context, name string) error {
 }
 
 func (m *MockOllamaClient) GetRunningModels(ctx context.Context) ([]ollama.RunningModel, error) {
-	return nil, m.err
+	if m.err != nil {
+		return nil, m.err
+	}
+	// Return empty slice instead of nil
+	return []ollama.RunningModel{}, nil
 }
 
 func (m *MockOllamaClient) Ping(ctx context.Context) error {
@@ -263,5 +278,107 @@ func TestModelManager_extractParameters(t *testing.T) {
 				t.Errorf("extractParameters(%s) = %s, want %s", tt.name, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestModelManager_PullModel(t *testing.T) {
+	tests := []struct {
+		name        string
+		available   bool
+		expectError bool
+	}{
+		{
+			name:        "successful pull",
+			available:   true,
+			expectError: false,
+		},
+		{
+			name:        "ollama unavailable",
+			available:   false,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := &MockOllamaClient{
+				available: tt.available,
+			}
+
+			mm := NewModelManager(mockClient)
+			progressCalled := false
+			progressFn := func(progress ollama.PullProgress) {
+				progressCalled = true
+			}
+
+			err := mm.PullModel(context.Background(), "test-model", progressFn)
+
+			if tt.expectError && err == nil {
+				t.Error("Expected error, got nil")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Expected no error, got %v", err)
+			}
+
+			// Progress function should be called for successful pulls
+			if !tt.expectError && !progressCalled {
+				t.Error("Expected progress function to be called")
+			}
+		})
+	}
+}
+
+func TestModelManager_DeleteModel(t *testing.T) {
+	tests := []struct {
+		name        string
+		available   bool
+		expectError bool
+	}{
+		{
+			name:        "successful delete",
+			available:   true,
+			expectError: false,
+		},
+		{
+			name:        "ollama unavailable",
+			available:   false,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := &MockOllamaClient{
+				available: tt.available,
+			}
+
+			mm := NewModelManager(mockClient)
+			err := mm.DeleteModel(context.Background(), "test-model")
+
+			if tt.expectError && err == nil {
+				t.Error("Expected error, got nil")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestModelManager_GetRunningModels(t *testing.T) {
+	mockClient := &MockOllamaClient{
+		available: true,
+	}
+
+	mm := NewModelManager(mockClient)
+	models, err := mm.GetRunningModels(context.Background())
+
+	if err != nil {
+		t.Fatalf("GetRunningModels() error = %v", err)
+	}
+
+	// Should return empty list from mock
+	if models == nil {
+		t.Error("Expected non-nil models slice")
 	}
 }

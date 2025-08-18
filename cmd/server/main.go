@@ -143,7 +143,7 @@ func main() {
 	router.Use(gin.Recovery())
 
 	// Setup API handlers
-	apiHandlers := httpapi.NewAPIHandlers(storage, messaging, contextConstructor, inferenceEngine)
+	apiHandlers := httpapi.NewAPIHandlers(storage, messaging, contextConstructor, inferenceEngine, modelManager)
 	apiHandlers.SetupRoutes(router)
 
 	// Setup WebSocket endpoint

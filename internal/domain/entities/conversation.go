@@ -9,7 +9,8 @@ type Conversation struct {
 	ID             string    `json:"id"`
 	Title          string    `json:"title"`
 	SystemPromptID string    `json:"system_prompt_id"`
-	MessageIDs     []string  `json:"message_ids"` // Ordered list of message IDs
+	Model          string    `json:"model,omitempty"` // Preferred model for this conversation
+	MessageIDs     []string  `json:"message_ids"`     // Ordered list of message IDs
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
@@ -42,6 +43,12 @@ func (c *Conversation) SetSystemPrompt(systemPromptID string) {
 // SetTitle updates the conversation title
 func (c *Conversation) SetTitle(title string) {
 	c.Title = title
+	c.UpdatedAt = time.Now()
+}
+
+// SetModel updates the preferred model for this conversation
+func (c *Conversation) SetModel(model string) {
+	c.Model = model
 	c.UpdatedAt = time.Now()
 }
 
