@@ -2,7 +2,9 @@ package websocket
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -16,7 +18,7 @@ import (
 
 // Hub manages all WebSocket connections
 type Hub struct {
-	clients   map[string]*Client // conversation_id -> client
+	clients   map[string]*Client // client_id -> client
 	clientsMu sync.RWMutex
 	messaging ports.MessagingPort
 	upgrader  websocket.Upgrader
@@ -25,6 +27,7 @@ type Hub struct {
 // Client represents a WebSocket client connection
 type Client struct {
 	conn           *websocket.Conn
+	clientID       string
 	conversationID string
 	send           chan []byte
 	hub            *Hub
@@ -32,12 +35,16 @@ type Client struct {
 
 // Message types for WebSocket communication
 const (
-	MessageTypeMessage  = "message"
-	MessageTypeResponse = "response"
-	MessageTypeError    = "error"
-	MessageTypeStatus   = "status"
-	MessageTypePing     = "ping"
-	MessageTypePong     = "pong"
+	MessageTypeMessage      = "message"
+	MessageTypeResponse     = "response"
+	MessageTypeError        = "error"
+	MessageTypeStatus       = "status"
+	MessageTypePing         = "ping"
+	MessageTypePong         = "pong"
+	MessageTypeMessageStart = "message_start"
+	MessageTypeMessageChunk = "message_chunk"
+	MessageTypeMessageComplete = "message_complete"
+	MessageTypeSubscribe    = "subscribe"
 )
 
 // WebSocketMessage represents a message sent over WebSocket
@@ -86,30 +93,28 @@ func (h *Hub) Start(ctx context.Context) error {
 
 // HandleWebSocket upgrades HTTP connections to WebSocket
 func (h *Hub) HandleWebSocket(c *gin.Context) {
-	conversationID := c.Query("conversation_id")
-	if conversationID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "conversation_id parameter required"})
-		return
-	}
-
 	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %v", err)
 		return
 	}
 
+	// Generate a unique client ID for the connection
+	clientID := generateClientID()
+
 	client := &Client{
 		conn:           conn,
-		conversationID: conversationID,
+		clientID:       clientID,
+		conversationID: "", // Will be set when client subscribes to a conversation
 		send:           make(chan []byte, 256),
 		hub:            h,
 	}
 
 	h.clientsMu.Lock()
-	h.clients[conversationID] = client
+	h.clients[clientID] = client
 	h.clientsMu.Unlock()
 
-	log.Printf("WebSocket client connected for conversation: %s", conversationID)
+	log.Printf("WebSocket client connected: %s", clientID)
 
 	// Start client goroutines
 	go client.writePump()
@@ -130,12 +135,17 @@ func (h *Hub) handleInferenceResponse(ctx context.Context, subject string, data 
 		return err
 	}
 
-	// Send response to relevant client
+	// Send response to all clients subscribed to this conversation
 	h.clientsMu.RLock()
-	client, exists := h.clients[response.ConversationID]
+	var relevantClients []*Client
+	for _, client := range h.clients {
+		if client.conversationID == response.ConversationID {
+			relevantClients = append(relevantClients, client)
+		}
+	}
 	h.clientsMu.RUnlock()
 
-	if exists {
+	for _, client := range relevantClients {
 		wsMsg := WebSocketMessage{
 			Type:           MessageTypeResponse,
 			ConversationID: response.ConversationID,
@@ -154,7 +164,7 @@ func (h *Hub) handleInferenceResponse(ctx context.Context, subject string, data 
 		case client.send <- msgBytes:
 		default:
 			// Client buffer is full, close the connection
-			h.removeClient(response.ConversationID)
+			h.removeClient(client.clientID)
 		}
 	}
 
@@ -174,12 +184,17 @@ func (h *Hub) handleSystemError(ctx context.Context, subject string, data []byte
 		return err
 	}
 
-	// Send error to relevant client
+	// Send error to all clients subscribed to this conversation
 	h.clientsMu.RLock()
-	client, exists := h.clients[errorEvent.ConversationID]
+	var relevantClients []*Client
+	for _, client := range h.clients {
+		if client.conversationID == errorEvent.ConversationID {
+			relevantClients = append(relevantClients, client)
+		}
+	}
 	h.clientsMu.RUnlock()
 
-	if exists {
+	for _, client := range relevantClients {
 		wsMsg := WebSocketMessage{
 			Type:           MessageTypeError,
 			ConversationID: errorEvent.ConversationID,
@@ -197,7 +212,7 @@ func (h *Hub) handleSystemError(ctx context.Context, subject string, data []byte
 		select {
 		case client.send <- msgBytes:
 		default:
-			h.removeClient(errorEvent.ConversationID)
+			h.removeClient(client.clientID)
 		}
 	}
 
@@ -205,14 +220,14 @@ func (h *Hub) handleSystemError(ctx context.Context, subject string, data []byte
 }
 
 // removeClient removes a client from the hub
-func (h *Hub) removeClient(conversationID string) {
+func (h *Hub) removeClient(clientID string) {
 	h.clientsMu.Lock()
 	defer h.clientsMu.Unlock()
 
-	if client, exists := h.clients[conversationID]; exists {
+	if client, exists := h.clients[clientID]; exists {
 		close(client.send)
-		delete(h.clients, conversationID)
-		log.Printf("WebSocket client disconnected for conversation: %s", conversationID)
+		delete(h.clients, clientID)
+		log.Printf("WebSocket client disconnected: %s (was subscribed to conversation: %s)", clientID, client.conversationID)
 	}
 }
 
@@ -227,12 +242,12 @@ func (h *Hub) Broadcast(message WebSocketMessage) {
 	h.clientsMu.RLock()
 	defer h.clientsMu.RUnlock()
 
-	for conversationID, client := range h.clients {
+	for clientID, client := range h.clients {
 		select {
 		case client.send <- msgBytes:
 		default:
 			// Client buffer is full, remove it
-			go h.removeClient(conversationID)
+			go h.removeClient(clientID)
 		}
 	}
 }
@@ -242,6 +257,16 @@ func (h *Hub) GetConnectionCount() int {
 	h.clientsMu.RLock()
 	defer h.clientsMu.RUnlock()
 	return len(h.clients)
+}
+
+// generateClientID creates a unique client ID
+func generateClientID() string {
+	bytes := make([]byte, 8)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to timestamp-based ID if random generation fails
+		return fmt.Sprintf("client_%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("client_%x", bytes)
 }
 
 // Client methods
@@ -263,7 +288,7 @@ const (
 // readPump pumps messages from the WebSocket connection to the hub
 func (c *Client) readPump() {
 	defer func() {
-		c.hub.removeClient(c.conversationID)
+		c.hub.removeClient(c.clientID)
 		c.conn.Close()
 	}()
 
@@ -298,6 +323,22 @@ func (c *Client) readPump() {
 				Timestamp: time.Now(),
 			}
 			c.sendMessage(pongMsg)
+
+		case MessageTypeSubscribe:
+			// Subscribe client to a conversation
+			if wsMsg.ConversationID != "" {
+				c.conversationID = wsMsg.ConversationID
+				log.Printf("Client %s subscribed to conversation %s", c.clientID, c.conversationID)
+				
+				// Send confirmation
+				confirmMsg := WebSocketMessage{
+					Type:           MessageTypeStatus,
+					ConversationID: c.conversationID,
+					Content:        "subscribed",
+					Timestamp:      time.Now(),
+				}
+				c.sendMessage(confirmMsg)
+			}
 
 		default:
 			log.Printf("Unknown WebSocket message type: %s", wsMsg.Type)
@@ -360,6 +401,6 @@ func (c *Client) sendMessage(message WebSocketMessage) {
 	select {
 	case c.send <- msgBytes:
 	default:
-		c.hub.removeClient(c.conversationID)
+		c.hub.removeClient(c.clientID)
 	}
 }

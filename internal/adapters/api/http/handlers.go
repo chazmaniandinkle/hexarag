@@ -74,6 +74,9 @@ func (h *APIHandlers) SetupRoutes(r *gin.Engine) {
 		// Analysis and insights
 		api.GET("/conversations/:id/analysis", h.analyzeConversation)
 		api.GET("/inference/status", h.getInferenceStatus)
+		
+		// Model management
+		api.GET("/models", h.listModels)
 	}
 
 	// Serve static files for the web UI
@@ -461,4 +464,33 @@ func (h *APIHandlers) getInferenceStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, status)
+}
+
+// Model management handlers
+
+func (h *APIHandlers) listModels(c *gin.Context) {
+	// For now, return a hardcoded list of available models
+	// In a full implementation, this would query the LLM provider
+	models := []gin.H{
+		{
+			"id":          "deepseek-r1:8b",
+			"name":        "DeepSeek R1 8B",
+			"description": "DeepSeek's reasoning model with 8B parameters",
+			"available":   true,
+		},
+		{
+			"id":          "llama3.2:3b",
+			"name":        "Llama 3.2 3B",
+			"description": "Meta's Llama 3.2 with 3B parameters",
+			"available":   false,
+		},
+		{
+			"id":          "qwen2.5:7b",
+			"name":        "Qwen 2.5 7B",
+			"description": "Alibaba's Qwen 2.5 with 7B parameters",
+			"available":   false,
+		},
+	}
+
+	c.JSON(http.StatusOK, gin.H{"models": models})
 }
