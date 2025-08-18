@@ -17,7 +17,7 @@ llm:
   provider: "openai-compatible"
   base_url: "http://localhost:11434/v1"  # Ollama default
   api_key: ""  # Set via HEXARAG_LLM_API_KEY env var if needed
-  model: "llama2"
+  model: "deepseek-r1:8b"  # Default to deepseek-r1:8b
   max_tokens: 4096
   temperature: 0.7
 

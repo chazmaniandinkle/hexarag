@@ -1,6 +1,6 @@
 # HexaRAG Makefile
 
-.PHONY: build run test clean migrate docker-build docker-run deps fmt lint vet
+.PHONY: build run test clean migrate docker-build docker-run deps fmt lint vet setup chat test-model models
 
 # Build the application
 build:
@@ -87,23 +87,65 @@ check-deps:
 	@echo "✓ Go is installed"
 	@go version
 
+# Interactive setup with Ollama detection
+setup:
+	@echo "🚀 Running HexaRAG setup..."
+	@chmod +x scripts/setup-ollama.sh
+	@./scripts/setup-ollama.sh
+
+# Launch chat UI in browser
+chat:
+	@echo "🗣️ Opening chat interface..."
+	@open http://localhost:8080 2>/dev/null || xdg-open http://localhost:8080 2>/dev/null || echo "Please open http://localhost:8080 in your browser"
+
+# Test current model configuration
+test-model:
+	@echo "🤖 Testing model connectivity..."
+	@curl -s http://localhost:8080/api/v1/conversations | jq -r 'if .conversations then "✓ API responding" else "✗ API error" end' || echo "✗ API not available"
+
+# List and manage models
+models:
+	@echo "📋 Available models:"
+	@docker-compose -f deployments/docker/docker-compose.yml exec ollama ollama list 2>/dev/null || echo "Ollama container not running"
+
+# Reset database for testing
+reset-db:
+	@echo "🗑️ Resetting database..."
+	@docker-compose -f deployments/docker/docker-compose.yml exec hexarag rm -f /data/hexarag.db
+	@docker-compose -f deployments/docker/docker-compose.yml restart hexarag
+	@echo "Database reset complete"
+
 # Help
 help:
-	@echo "Available targets:"
-	@echo "  build        - Build the application"
-	@echo "  run          - Run the application"
-	@echo "  migrate      - Run database migrations"
-	@echo "  test         - Run tests"
-	@echo "  test-coverage - Run tests with coverage report"
-	@echo "  clean        - Clean build artifacts"
-	@echo "  deps         - Install dependencies"
-	@echo "  fmt          - Format code"
-	@echo "  lint         - Lint code"
-	@echo "  vet          - Vet code"
-	@echo "  docker-build - Build Docker image"
-	@echo "  docker-run   - Run with Docker Compose"
-	@echo "  docker-stop  - Stop Docker Compose services"
-	@echo "  dev-setup    - Setup development environment"
-	@echo "  dev          - Run development server with auto-reload"
-	@echo "  check-deps   - Check if dependencies are available"
-	@echo "  help         - Show this help message"
+	@echo "HexaRAG Makefile Commands:"
+	@echo ""
+	@echo "🚀 Getting Started:"
+	@echo "  setup          - Interactive setup with Ollama detection"
+	@echo "  chat           - Launch chat interface in browser"
+	@echo "  test-model     - Test current model configuration"
+	@echo ""
+	@echo "🛠️ Development:"
+	@echo "  build          - Build the application"
+	@echo "  run            - Run the application locally"
+	@echo "  migrate        - Run database migrations"
+	@echo "  dev-setup      - Setup development environment"
+	@echo "  dev            - Run development server with auto-reload"
+	@echo ""
+	@echo "🧪 Testing & Quality:"
+	@echo "  test           - Run tests"
+	@echo "  test-coverage  - Run tests with coverage report"
+	@echo "  fmt            - Format code"
+	@echo "  lint           - Lint code"
+	@echo "  vet            - Vet code"
+	@echo ""
+	@echo "🐳 Docker:"
+	@echo "  docker-build   - Build Docker image"
+	@echo "  docker-run     - Run with Docker Compose"
+	@echo "  docker-stop    - Stop Docker Compose services"
+	@echo ""
+	@echo "🔧 Utilities:"
+	@echo "  models         - List available models"
+	@echo "  reset-db       - Reset database for testing"
+	@echo "  clean          - Clean build artifacts"
+	@echo "  deps           - Install dependencies"
+	@echo "  check-deps     - Check if dependencies are available"
