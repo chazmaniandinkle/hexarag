@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # NATS server with JetStream
   nats:
@@ -17,17 +15,22 @@ services:
     networks:
       - hexarag
 
-  # Ollama for local LLM inference
+  # Ollama for local LLM inference (managed mode)
   ollama:
+    profiles:
+      - managed
+      - full-stack
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
     volumes:
-      - ollama_data:/root/.ollama
+      # Mount host Ollama models by default to avoid re-downloading
+      - ${OLLAMA_MODELS_PATH:-~/.ollama}:/root/.ollama
     networks:
       - hexarag
     environment:
       - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MODELS=/root/.ollama
 
   # HexaRAG server
   hexarag:
@@ -35,17 +38,33 @@ services:
       context: ../..
       dockerfile: deployments/docker/Dockerfile
     ports:
-      - "8080:8080"
+      - "${HEXARAG_SERVER_PORT:-8080}:8080"
     depends_on:
       - nats
-      - ollama
     environment:
-      - HEXARAG_NATS_URL=nats://nats:4222
-      - HEXARAG_LLM_BASE_URL=http://ollama:11434/v1
+      # Server configuration
+      - HEXARAG_SERVER_PORT=8080
+      - HEXARAG_SERVER_HOST=0.0.0.0
+      # Database configuration  
       - HEXARAG_DATABASE_PATH=/data/hexarag.db
       - HEXARAG_DATABASE_MIGRATIONS_PATH=/app/migrations
+      # NATS configuration
+      - HEXARAG_NATS_URL=nats://nats:4222
+      - HEXARAG_NATS_JETSTREAM_ENABLED=true
+      - HEXARAG_NATS_JETSTREAM_RETENTION_DAYS=7
+      # LLM configuration (dynamically set based on mode)
+      - HEXARAG_LLM_PROVIDER=${HEXARAG_LLM_PROVIDER:-openai-compatible}
+      - HEXARAG_LLM_BASE_URL=${HEXARAG_LLM_BASE_URL:-http://ollama:11434/v1}
+      - HEXARAG_LLM_MODEL=${HEXARAG_LLM_MODEL:-deepseek-r1:8b}
+      - HEXARAG_LLM_MAX_TOKENS=${HEXARAG_LLM_MAX_TOKENS:-4096}
+      - HEXARAG_LLM_TEMPERATURE=${HEXARAG_LLM_TEMPERATURE:-0.7}
+      # Tools configuration
+      - HEXARAG_TOOLS_MCP_TIME_SERVER_ENABLED=true
+      # Logging
+      - HEXARAG_LOGGING_LEVEL=${HEXARAG_LOGGING_LEVEL:-info}
+      - HEXARAG_LOGGING_FORMAT=${HEXARAG_LOGGING_FORMAT:-json}
     volumes:
-      - hexarag_data:/data
+      - ${HEXARAG_DATA_PATH:-hexarag_data}:/data
     networks:
       - hexarag
     restart: unless-stopped
