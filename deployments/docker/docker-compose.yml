@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # NATS server with JetStream
+  nats:
+    image: nats:2.10-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # HTTP monitoring
+    command: [
+      "--jetstream",
+      "--store_dir=/data",
+      "--http_port=8222"
+    ]
+    volumes:
+      - nats_data:/data
+    networks:
+      - hexarag
+
+  # Ollama for local LLM inference
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - hexarag
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+
+  # HexaRAG server
+  hexarag:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - nats
+      - ollama
+    environment:
+      - HEXARAG_NATS_URL=nats://nats:4222
+      - HEXARAG_LLM_BASE_URL=http://ollama:11434/v1
+      - HEXARAG_DATABASE_PATH=/data/hexarag.db
+      - HEXARAG_DATABASE_MIGRATIONS_PATH=/app/migrations
+    volumes:
+      - hexarag_data:/data
+    networks:
+      - hexarag
+    restart: unless-stopped
+
+volumes:
+  nats_data:
+  ollama_data:
+  hexarag_data:
+
+networks:
+  hexarag:
+    driver: bridge
