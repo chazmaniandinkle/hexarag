@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"github.com/username/hexarag/internal/domain/entities"
 )
@@ -67,9 +68,14 @@ type TokenUsage struct {
 
 // Model represents an available language model
 type Model struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description,omitempty"`
-	MaxTokens   int               `json:"max_tokens,omitempty"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	Size        int64     `json:"size,omitempty"`
+	Family      string    `json:"family,omitempty"`
+	Parameters  string    `json:"parameters,omitempty"`
+	Available   bool      `json:"available"`
+	ModifiedAt  time.Time `json:"modified_at,omitempty"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
