@@ -2,12 +2,14 @@ package http
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/username/hexarag/internal/adapters/llm/ollama"
 	"github.com/username/hexarag/internal/domain/entities"
 	"github.com/username/hexarag/internal/domain/ports"
 	"github.com/username/hexarag/internal/domain/services"
@@ -19,15 +21,17 @@ type APIHandlers struct {
 	messaging          ports.MessagingPort
 	contextConstructor *services.ContextConstructor
 	inferenceEngine    *services.InferenceEngine
+	modelManager       *services.ModelManager
 }
 
 // NewAPIHandlers creates a new API handlers instance
-func NewAPIHandlers(storage ports.StoragePort, messaging ports.MessagingPort, cc *services.ContextConstructor, ie *services.InferenceEngine) *APIHandlers {
+func NewAPIHandlers(storage ports.StoragePort, messaging ports.MessagingPort, cc *services.ContextConstructor, ie *services.InferenceEngine, mm *services.ModelManager) *APIHandlers {
 	return &APIHandlers{
 		storage:            storage,
 		messaging:          messaging,
 		contextConstructor: cc,
 		inferenceEngine:    ie,
+		modelManager:       mm,
 	}
 }
 
@@ -77,6 +81,11 @@ func (h *APIHandlers) SetupRoutes(r *gin.Engine) {
 		
 		// Model management
 		api.GET("/models", h.listModels)
+		api.POST("/models/pull", h.pullModel)
+		api.GET("/models/:id", h.getModelInfo)
+		api.PUT("/models/current", h.switchModel)
+		api.DELETE("/models/:id", h.deleteModel)
+		api.GET("/models/status", h.getModelStatus)
 	}
 
 	// Serve static files for the web UI
@@ -469,28 +478,188 @@ func (h *APIHandlers) getInferenceStatus(c *gin.Context) {
 // Model management handlers
 
 func (h *APIHandlers) listModels(c *gin.Context) {
-	// For now, return a hardcoded list of available models
-	// In a full implementation, this would query the LLM provider
-	models := []gin.H{
-		{
-			"id":          "deepseek-r1:8b",
-			"name":        "DeepSeek R1 8B",
-			"description": "DeepSeek's reasoning model with 8B parameters",
-			"available":   true,
-		},
-		{
-			"id":          "llama3.2:3b",
-			"name":        "Llama 3.2 3B",
-			"description": "Meta's Llama 3.2 with 3B parameters",
-			"available":   false,
-		},
-		{
-			"id":          "qwen2.5:7b",
-			"name":        "Qwen 2.5 7B",
-			"description": "Alibaba's Qwen 2.5 with 7B parameters",
-			"available":   false,
-		},
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	models, err := h.modelManager.GetAvailableModels(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
+func (h *APIHandlers) pullModel(c *gin.Context) {
+	var req struct {
+		Model string `json:"model" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second) // 5 minute timeout for model pull
+	defer cancel()
+
+	// Start async pull with progress tracking
+	go func() {
+		progressFn := func(progress ollama.PullProgress) {
+			// Broadcast progress via messaging system
+			progressMsg := map[string]interface{}{
+				"type":        "model_pull_progress",
+				"model":       req.Model,
+				"status":      progress.Status,
+				"completed":   progress.Completed,
+				"total":       progress.Total,
+				"percent":     0,
+				"timestamp":   time.Now(),
+			}
+
+			if progress.Total > 0 {
+				progressMsg["percent"] = float64(progress.Completed) / float64(progress.Total) * 100
+			}
+
+			if err := h.messaging.PublishJSON(context.Background(), "model.pull.progress", progressMsg); err != nil {
+				log.Printf("Failed to broadcast pull progress: %v", err)
+			}
+		}
+
+		if err := h.modelManager.PullModel(ctx, req.Model, progressFn); err != nil {
+			// Broadcast error
+			errorMsg := map[string]interface{}{
+				"type":      "model_pull_error",
+				"model":     req.Model,
+				"error":     err.Error(),
+				"timestamp": time.Now(),
+			}
+			h.messaging.PublishJSON(context.Background(), "model.pull.error", errorMsg)
+		} else {
+			// Broadcast completion
+			completeMsg := map[string]interface{}{
+				"type":      "model_pull_complete",
+				"model":     req.Model,
+				"timestamp": time.Now(),
+			}
+			h.messaging.PublishJSON(context.Background(), "model.pull.complete", completeMsg)
+		}
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"status":  "pulling", 
+		"model":   req.Model,
+		"message": "Model download started",
+	})
+}
+
+func (h *APIHandlers) getModelInfo(c *gin.Context) {
+	modelID := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	model, err := h.modelManager.GetModelInfo(ctx, modelID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Model not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, model)
+}
+
+func (h *APIHandlers) switchModel(c *gin.Context) {
+	var req struct {
+		Model          string `json:"model" binding:"required"`
+		ConversationID string `json:"conversation_id"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Validate model exists
+	if err := h.modelManager.ValidateModel(ctx, req.Model); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Model not available"})
+		return
+	}
+
+	// If conversation ID provided, update conversation's preferred model
+	if req.ConversationID != "" {
+		conversation, err := h.storage.GetConversation(ctx, req.ConversationID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
+			return
+		}
+
+		// Set model preference on conversation
+		conversation.SetModel(req.Model)
+		if err := h.storage.UpdateConversation(ctx, conversation); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Broadcast model switch event
+		switchMsg := map[string]interface{}{
+			"type":            "model_switched",
+			"conversation_id": req.ConversationID,
+			"model":           req.Model,
+			"timestamp":       time.Now(),
+		}
+		h.messaging.PublishJSON(ctx, "model.switch", switchMsg)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "switched",
+		"model":    req.Model,
+		"message":  "Model switched successfully",
+	})
+}
+
+func (h *APIHandlers) deleteModel(c *gin.Context) {
+	modelID := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := h.modelManager.DeleteModel(ctx, modelID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Broadcast model deletion event
+	deleteMsg := map[string]interface{}{
+		"type":      "model_deleted",
+		"model":     modelID,
+		"timestamp": time.Now(),
+	}
+	h.messaging.PublishJSON(ctx, "model.delete", deleteMsg)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "deleted",
+		"model":   modelID,
+		"message": "Model deleted successfully",
+	})
+}
+
+func (h *APIHandlers) getModelStatus(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	runningModels, err := h.modelManager.GetRunningModels(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	status := gin.H{
+		"running_models": runningModels,
+		"timestamp":      time.Now(),
+	}
+
+	c.JSON(http.StatusOK, status)
 }

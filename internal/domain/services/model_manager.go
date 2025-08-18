@@ -305,3 +305,57 @@ func (mm *ModelManager) ClearCache() {
 func (mm *ModelManager) IsModelAvailable(ctx context.Context, modelName string) bool {
 	return mm.ValidateModel(ctx, modelName) == nil
 }
+
+// PullModel downloads a model from Ollama with progress tracking
+func (mm *ModelManager) PullModel(ctx context.Context, modelName string, progressFn func(ollama.PullProgress)) error {
+	// Check if Ollama is available
+	if err := mm.ollamaClient.Ping(ctx); err != nil {
+		return fmt.Errorf("Ollama not available: %w", err)
+	}
+
+	// Start model pull
+	if err := mm.ollamaClient.PullModel(ctx, modelName, progressFn); err != nil {
+		return fmt.Errorf("failed to pull model %s: %w", modelName, err)
+	}
+
+	// Clear cache to force refresh on next request
+	mm.ClearCache()
+	
+	log.Printf("Successfully pulled model: %s", modelName)
+	return nil
+}
+
+// DeleteModel removes a model from Ollama
+func (mm *ModelManager) DeleteModel(ctx context.Context, modelName string) error {
+	// Check if Ollama is available
+	if err := mm.ollamaClient.Ping(ctx); err != nil {
+		return fmt.Errorf("Ollama not available: %w", err)
+	}
+
+	// Delete the model
+	if err := mm.ollamaClient.DeleteModel(ctx, modelName); err != nil {
+		return fmt.Errorf("failed to delete model %s: %w", modelName, err)
+	}
+
+	// Clear cache to force refresh on next request
+	mm.ClearCache()
+	
+	log.Printf("Successfully deleted model: %s", modelName)
+	return nil
+}
+
+// GetRunningModels returns currently running models from Ollama
+func (mm *ModelManager) GetRunningModels(ctx context.Context) ([]ollama.RunningModel, error) {
+	// Check if Ollama is available
+	if err := mm.ollamaClient.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("Ollama not available: %w", err)
+	}
+
+	// Get running models
+	runningModels, err := mm.ollamaClient.GetRunningModels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get running models: %w", err)
+	}
+
+	return runningModels, nil
+}
