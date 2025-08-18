@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	httpapi "github.com/username/hexarag/internal/adapters/api/http"
 	"github.com/username/hexarag/internal/adapters/api/websocket"
+	"github.com/username/hexarag/internal/adapters/llm/ollama"
 	"github.com/username/hexarag/internal/adapters/llm/openai"
 	"github.com/username/hexarag/internal/adapters/messaging/nats"
 	"github.com/username/hexarag/internal/adapters/storage/sqlite"
@@ -65,12 +67,26 @@ func main() {
 	}
 	defer messaging.Close()
 
+	// Initialize Ollama client and model manager
+	ollamaBaseURL := strings.Replace(cfg.LLM.BaseURL, "/v1", "", 1)
+	ollamaClient := ollama.NewClient(ollamaBaseURL)
+	modelManager := services.NewModelManager(ollamaClient)
+
+	// Validate default model exists (non-fatal)
+	if err := modelManager.ValidateModel(ctx, cfg.LLM.Model); err != nil {
+		log.Printf("Warning: Default model %s not available: %v", cfg.LLM.Model, err)
+		log.Printf("The system will continue but may not function properly until models are available")
+	} else {
+		log.Printf("Default model %s validated successfully", cfg.LLM.Model)
+	}
+
 	// Initialize LLM adapter
 	llmAdapter, err := openai.NewAdapter(
 		cfg.LLM.BaseURL,
 		cfg.LLM.APIKey,
 		cfg.LLM.Model,
 		cfg.LLM.Provider,
+		modelManager,
 	)
 	if err != nil {
 		log.Fatalf("Failed to initialize LLM adapter: %v", err)

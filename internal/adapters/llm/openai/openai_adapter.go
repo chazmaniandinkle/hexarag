@@ -11,18 +11,20 @@ import (
 
 	"github.com/username/hexarag/internal/domain/entities"
 	"github.com/username/hexarag/internal/domain/ports"
+	"github.com/username/hexarag/internal/domain/services"
 )
 
 // Adapter implements the LLMPort interface using OpenAI-compatible APIs
 type Adapter struct {
-	client   *openai.Client
-	model    string
-	baseURL  string
-	provider string
+	client       *openai.Client
+	model        string
+	baseURL      string
+	provider     string
+	modelManager *services.ModelManager
 }
 
 // NewAdapter creates a new OpenAI-compatible LLM adapter
-func NewAdapter(baseURL, apiKey, model, provider string) (*Adapter, error) {
+func NewAdapter(baseURL, apiKey, model, provider string, modelManager *services.ModelManager) (*Adapter, error) {
 	config := openai.DefaultConfig(apiKey)
 
 	// Override base URL for local providers like Ollama/LM Studio
@@ -33,21 +35,28 @@ func NewAdapter(baseURL, apiKey, model, provider string) (*Adapter, error) {
 	client := openai.NewClientWithConfig(config)
 
 	return &Adapter{
-		client:   client,
-		model:    model,
-		baseURL:  baseURL,
-		provider: provider,
+		client:       client,
+		model:        model,
+		baseURL:      baseURL,
+		provider:     provider,
+		modelManager: modelManager,
 	}, nil
 }
 
 // Complete generates a completion for the given messages
 func (a *Adapter) Complete(ctx context.Context, request *ports.CompletionRequest) (*ports.CompletionResponse, error) {
+	// Select and validate the model
+	selectedModel := a.selectModel(request.Model)
+	if err := a.validateModel(ctx, selectedModel); err != nil {
+		return nil, fmt.Errorf("model validation failed: %w", err)
+	}
+
 	// Convert our messages to OpenAI format
 	messages := a.convertMessages(request.Messages, request.SystemPrompt)
 
 	// Build the request
 	req := openai.ChatCompletionRequest{
-		Model:       a.selectModel(request.Model),
+		Model:       selectedModel,
 		Messages:    messages,
 		MaxTokens:   request.MaxTokens,
 		Temperature: float32(request.Temperature),
@@ -126,12 +135,18 @@ func (a *Adapter) Complete(ctx context.Context, request *ports.CompletionRequest
 
 // CompleteStream generates a streaming completion
 func (a *Adapter) CompleteStream(ctx context.Context, request *ports.CompletionRequest, handler ports.StreamHandler) error {
+	// Select and validate the model
+	selectedModel := a.selectModel(request.Model)
+	if err := a.validateModel(ctx, selectedModel); err != nil {
+		return fmt.Errorf("model validation failed: %w", err)
+	}
+
 	// Convert our messages to OpenAI format
 	messages := a.convertMessages(request.Messages, request.SystemPrompt)
 
 	// Build the request
 	req := openai.ChatCompletionRequest{
-		Model:       a.selectModel(request.Model),
+		Model:       selectedModel,
 		Messages:    messages,
 		MaxTokens:   request.MaxTokens,
 		Temperature: float32(request.Temperature),
@@ -235,13 +250,19 @@ func (a *Adapter) estimateTokens(text string) int {
 
 // GetModels returns the list of available models
 func (a *Adapter) GetModels(ctx context.Context) ([]ports.Model, error) {
+	if a.isLocalProvider() && a.modelManager != nil {
+		// For local providers with ModelManager, use real Ollama data
+		return a.modelManager.GetAvailableModels(ctx)
+	}
+
 	if a.isLocalProvider() {
-		// For local providers, return configured model
+		// Fallback for local providers without ModelManager
 		return []ports.Model{
 			{
 				ID:          a.model,
 				Name:        a.model,
 				Description: fmt.Sprintf("Local model via %s", a.provider),
+				Available:   true,
 			},
 		}, nil
 	}
@@ -255,8 +276,9 @@ func (a *Adapter) GetModels(ctx context.Context) ([]ports.Model, error) {
 	var models []ports.Model
 	for _, model := range modelsList.Models {
 		models = append(models, ports.Model{
-			ID:   model.ID,
-			Name: model.ID,
+			ID:        model.ID,
+			Name:      model.ID,
+			Available: true,
 		})
 	}
 
@@ -355,6 +377,15 @@ func (a *Adapter) selectModel(requestModel string) string {
 		return requestModel
 	}
 	return a.model
+}
+
+// validateModel checks if a model is available (for local providers with ModelManager)
+func (a *Adapter) validateModel(ctx context.Context, modelName string) error {
+	if a.isLocalProvider() && a.modelManager != nil {
+		return a.modelManager.ValidateModel(ctx, modelName)
+	}
+	// For non-local providers, assume model is valid
+	return nil
 }
 
 // isLocalProvider checks if we're using a local provider
