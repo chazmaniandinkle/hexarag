@@ -3,6 +3,200 @@
  * Handles WebSocket connections, API calls, and chat interface interactions
  */
 
+/**
+ * Model Manager class for handling model operations
+ */
+class ModelManager {
+    constructor(apiBase, wsConnection) {
+        this.api = apiBase;
+        this.ws = wsConnection;
+        this.models = new Map();
+        this.downloadQueue = new Map();
+        this.currentModel = null;
+    }
+    
+    async loadModels() {
+        try {
+            const response = await fetch(`${this.api}/models`);
+            const data = await response.json();
+            
+            // Update models map
+            this.models.clear();
+            data.models.forEach(model => {
+                this.models.set(model.id, model);
+            });
+            
+            return data.models;
+        } catch (error) {
+            console.error('Failed to load models:', error);
+            throw error;
+        }
+    }
+    
+    async pullModel(modelName) {
+        try {
+            const response = await fetch(`${this.api}/models/pull`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: modelName })
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Failed to start model pull: ${response.statusText}`);
+            }
+            
+            // Add to download queue
+            this.downloadQueue.set(modelName, {
+                model: modelName,
+                status: 'starting',
+                progress: 0,
+                startTime: Date.now()
+            });
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to pull model:', error);
+            throw error;
+        }
+    }
+    
+    async deleteModel(modelName) {
+        try {
+            const response = await fetch(`${this.api}/models/${encodeURIComponent(modelName)}`, {
+                method: 'DELETE'
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Failed to delete model: ${response.statusText}`);
+            }
+            
+            // Remove from local models map
+            this.models.delete(modelName);
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to delete model:', error);
+            throw error;
+        }
+    }
+    
+    async switchModel(modelName, conversationId = null) {
+        try {
+            const response = await fetch(`${this.api}/models/current`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    model: modelName,
+                    conversation_id: conversationId 
+                })
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Failed to switch model: ${response.statusText}`);
+            }
+            
+            this.currentModel = modelName;
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to switch model:', error);
+            throw error;
+        }
+    }
+    
+    async getModelInfo(modelName) {
+        try {
+            const response = await fetch(`${this.api}/models/${encodeURIComponent(modelName)}`);
+            
+            if (!response.ok) {
+                throw new Error(`Failed to get model info: ${response.statusText}`);
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to get model info:', error);
+            throw error;
+        }
+    }
+    
+    async getModelStatus() {
+        try {
+            const response = await fetch(`${this.api}/models/status`);
+            
+            if (!response.ok) {
+                throw new Error(`Failed to get model status: ${response.statusText}`);
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to get model status:', error);
+            throw error;
+        }
+    }
+    
+    handleWebSocketMessage(message) {
+        switch(message.type) {
+            case 'model_pull_progress':
+                this.updateProgress(message.model, message.percent, message.status);
+                break;
+            case 'model_pull_complete':
+                this.onModelReady(message.model);
+                break;
+            case 'model_pull_error':
+                this.onModelError(message.model, message.error);
+                break;
+            case 'model_switched':
+                this.onModelSwitched(message.model, message.conversation_id);
+                break;
+            case 'model_deleted':
+                this.onModelDeleted(message.model);
+                break;
+        }
+    }
+    
+    updateProgress(modelName, percent, status) {
+        if (this.downloadQueue.has(modelName)) {
+            const download = this.downloadQueue.get(modelName);
+            download.progress = percent;
+            download.status = status;
+            this.downloadQueue.set(modelName, download);
+        }
+        
+        // Trigger UI update
+        this.onProgressUpdate?.(modelName, percent, status);
+    }
+    
+    onModelReady(modelName) {
+        // Remove from download queue
+        this.downloadQueue.delete(modelName);
+        
+        // Trigger UI update
+        this.onModelComplete?.(modelName);
+    }
+    
+    onModelError(modelName, error) {
+        // Update download queue with error
+        if (this.downloadQueue.has(modelName)) {
+            const download = this.downloadQueue.get(modelName);
+            download.status = 'error';
+            download.error = error;
+            this.downloadQueue.set(modelName, download);
+        }
+        
+        // Trigger UI update
+        this.onModelError?.(modelName, error);
+    }
+    
+    onModelSwitched(modelName, conversationId) {
+        this.currentModel = modelName;
+        this.onSwitchComplete?.(modelName, conversationId);
+    }
+    
+    onModelDeleted(modelName) {
+        this.models.delete(modelName);
+        this.onDeleteComplete?.(modelName);
+    }
+}
+
 class HexaRAGChat {
     constructor() {
         this.apiBase = '/api/v1';
@@ -12,6 +206,10 @@ class HexaRAGChat {
         this.currentConversationId = null;
         this.conversations = new Map();
         this.isTyping = false;
+        
+        // Initialize model manager
+        this.modelManager = new ModelManager(this.apiBase, this.ws);
+        this.setupModelManagerCallbacks();
         
         this.initializeElements();
         this.initializeEventListeners();
@@ -35,6 +233,24 @@ class HexaRAGChat {
         this.modelSelector = document.getElementById('modelSelector');
         this.newChatBtn = document.getElementById('newChatBtn');
         this.refreshBtn = document.getElementById('refreshConversations');
+        this.manageModelsBtn = document.getElementById('manageModelsBtn');
+        
+        // Modal elements
+        this.modelModal = document.getElementById('modelModal');
+        this.closeModalBtn = document.getElementById('closeModalBtn');
+        this.modelSearch = document.getElementById('modelSearch');
+        this.pullSearchedModel = document.getElementById('pullSearchedModel');
+        this.modelGrid = document.getElementById('modelGrid');
+        this.downloadQueue = document.getElementById('downloadQueue');
+        this.downloadSection = document.getElementById('downloadSection');
+        this.runningModels = document.getElementById('runningModels');
+        
+        // Confirmation dialog
+        this.confirmDialog = document.getElementById('confirmDialog');
+        this.confirmTitle = document.getElementById('confirmTitle');
+        this.confirmMessage = document.getElementById('confirmMessage');
+        this.confirmOk = document.getElementById('confirmOk');
+        this.confirmCancel = document.getElementById('confirmCancel');
         
         // Options
         this.extendedKnowledge = document.getElementById('extendedKnowledge');
@@ -65,8 +281,28 @@ class HexaRAGChat {
         
         // Model selector
         this.modelSelector.addEventListener('change', () => {
-            // TODO: Update current conversation model
-            console.log('Model changed to:', this.modelSelector.value);
+            this.switchModel(this.modelSelector.value);
+        });
+        
+        // Model management
+        this.manageModelsBtn.addEventListener('click', () => this.openModelModal());
+        this.closeModalBtn.addEventListener('click', () => this.closeModelModal());
+        this.pullSearchedModel.addEventListener('click', () => this.pullModelFromSearch());
+        
+        // Confirmation dialog
+        this.confirmCancel.addEventListener('click', () => this.closeConfirmDialog());
+        
+        // Modal close on background click
+        this.modelModal.addEventListener('click', (e) => {
+            if (e.target === this.modelModal) {
+                this.closeModelModal();
+            }
+        });
+        
+        this.confirmDialog.addEventListener('click', (e) => {
+            if (e.target === this.confirmDialog) {
+                this.closeConfirmDialog();
+            }
         });
     }
 
@@ -112,6 +348,12 @@ class HexaRAGChat {
         try {
             const data = JSON.parse(event.data);
             console.log('WebSocket message:', data);
+            
+            // Check if this is a model-related message
+            if (data.type?.startsWith('model_')) {
+                this.modelManager.handleWebSocketMessage(data);
+                return;
+            }
             
             switch (data.type) {
                 case 'message_start':
@@ -225,32 +467,142 @@ class HexaRAGChat {
 
     async loadModels() {
         try {
-            const response = await this.apiCall('/models');
-            const models = response.models || [];
-            
-            // Clear existing options
-            this.modelSelector.innerHTML = '';
-            
-            // Add available models
-            models.forEach(model => {
-                const option = document.createElement('option');
-                option.value = model.id;
-                option.textContent = model.name;
-                option.disabled = !model.available;
-                option.title = model.description;
-                
-                if (model.id === 'deepseek-r1:8b') {
-                    option.selected = true;
-                }
-                
-                this.modelSelector.appendChild(option);
-            });
-            
+            const models = await this.modelManager.loadModels();
+            this.updateModelSelector(models);
             console.log(`Loaded ${models.length} models`);
         } catch (error) {
             console.error('Failed to load models:', error);
             // Keep default option if API fails
         }
+    }
+    
+    updateModelSelector(models) {
+        // Clear existing options
+        this.modelSelector.innerHTML = '';
+        
+        // Add available models
+        models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = model.id;
+            option.textContent = model.name;
+            option.disabled = !model.available;
+            option.title = model.description;
+            
+            if (model.id === 'deepseek-r1:8b') {
+                option.selected = true;
+                this.modelManager.currentModel = model.id;
+            }
+            
+            this.modelSelector.appendChild(option);
+        });
+    }
+    
+    async switchModel(modelName) {
+        try {
+            await this.modelManager.switchModel(modelName, this.currentConversationId);
+            console.log(`Model switched to: ${modelName}`);
+        } catch (error) {
+            console.error('Failed to switch model:', error);
+            // Revert selector to previous value
+            this.modelSelector.value = this.modelManager.currentModel || '';
+        }
+    }
+    
+    setupModelManagerCallbacks() {
+        // Set up callbacks for model manager events
+        this.modelManager.onProgressUpdate = (modelName, percent, status) => {
+            this.updateModelProgress(modelName, percent, status);
+        };
+        
+        this.modelManager.onModelComplete = (modelName) => {
+            this.onModelDownloadComplete(modelName);
+        };
+        
+        this.modelManager.onModelError = (modelName, error) => {
+            this.onModelDownloadError(modelName, error);
+        };
+        
+        this.modelManager.onSwitchComplete = (modelName, conversationId) => {
+            this.onModelSwitchComplete(modelName, conversationId);
+        };
+        
+        this.modelManager.onDeleteComplete = (modelName) => {
+            this.onModelDeleteComplete(modelName);
+        };
+    }
+    
+    updateModelProgress(modelName, percent, status) {
+        // Find model progress element and update it
+        const progressElement = document.querySelector(`[data-model="${modelName}"] .progress-fill`);
+        if (progressElement) {
+            progressElement.style.width = `${percent}%`;
+        }
+        
+        const statusElement = document.querySelector(`[data-model="${modelName}"] .progress-text`);
+        if (statusElement) {
+            statusElement.textContent = `${Math.round(percent)}% - ${status}`;
+        }
+        
+        console.log(`Model ${modelName}: ${percent}% - ${status}`);
+    }
+    
+    onModelDownloadComplete(modelName) {
+        console.log(`Model download complete: ${modelName}`);
+        
+        // Remove from download queue UI
+        const downloadElement = document.querySelector(`[data-model="${modelName}"]`);
+        if (downloadElement && downloadElement.closest('.download-item')) {
+            downloadElement.closest('.download-item').remove();
+        }
+        
+        // Refresh model list
+        this.loadModels();
+        
+        // Show success message
+        this.addSystemMessage(`Model ${modelName} downloaded successfully`);
+    }
+    
+    onModelDownloadError(modelName, error) {
+        console.error(`Model download error for ${modelName}:`, error);
+        
+        // Update UI to show error
+        const statusElement = document.querySelector(`[data-model="${modelName}"] .progress-text`);
+        if (statusElement) {
+            statusElement.textContent = `Error: ${error}`;
+            statusElement.style.color = 'var(--error-color)';
+        }
+        
+        // Show error message
+        this.addSystemMessage(`Failed to download ${modelName}: ${error}`);
+    }
+    
+    onModelSwitchComplete(modelName, conversationId) {
+        console.log(`Model switched to ${modelName} for conversation ${conversationId || 'global'}`);
+        
+        // Update model selector
+        if (this.modelSelector.value !== modelName) {
+            this.modelSelector.value = modelName;
+        }
+        
+        // Show success message
+        if (conversationId) {
+            this.addSystemMessage(`Model switched to ${modelName} for this conversation`);
+        }
+    }
+    
+    onModelDeleteComplete(modelName) {
+        console.log(`Model deleted: ${modelName}`);
+        
+        // Remove from model selector if it was the selected model
+        if (this.modelSelector.value === modelName) {
+            this.modelSelector.value = '';
+        }
+        
+        // Refresh model list
+        this.loadModels();
+        
+        // Show success message
+        this.addSystemMessage(`Model ${modelName} deleted successfully`);
     }
 
     async createNewConversation() {
@@ -554,6 +906,218 @@ class HexaRAGChat {
         if (diffDays < 7) return `${diffDays}d ago`;
         
         return date.toLocaleDateString();
+    }
+    
+    // Model Management UI Methods
+    async openModelModal() {
+        this.modelModal.style.display = 'flex';
+        await this.loadModalContent();
+    }
+    
+    closeModelModal() {
+        this.modelModal.style.display = 'none';
+    }
+    
+    async loadModalContent() {
+        // Load available models
+        try {
+            const models = await this.modelManager.loadModels();
+            this.renderModelGrid(models);
+        } catch (error) {
+            this.modelGrid.innerHTML = '<div class="error">Failed to load models</div>';
+        }
+        
+        // Load running models
+        try {
+            const status = await this.modelManager.getModelStatus();
+            this.renderRunningModels(status.running_models || []);
+        } catch (error) {
+            this.runningModels.innerHTML = '<div class="error">Failed to load running models</div>';
+        }
+        
+        // Update download queue
+        this.updateDownloadQueueUI();
+    }
+    
+    renderModelGrid(models) {
+        if (models.length === 0) {
+            this.modelGrid.innerHTML = '<div class="empty">No models available</div>';
+            return;
+        }
+        
+        this.modelGrid.innerHTML = models.map(model => `
+            <div class="model-card" data-model="${model.id}">
+                <div class="model-header">
+                    <h4>${this.escapeHtml(model.name)}</h4>
+                    <div class="model-status ${model.available ? 'available' : 'unavailable'}">
+                        ${model.available ? '✓ Available' : '⚠ Offline'}
+                    </div>
+                </div>
+                <div class="model-info">
+                    <div class="model-detail">
+                        <span class="label">Family:</span>
+                        <span class="value">${this.escapeHtml(model.family || 'Unknown')}</span>
+                    </div>
+                    <div class="model-detail">
+                        <span class="label">Parameters:</span>
+                        <span class="value">${this.escapeHtml(model.parameters || 'Unknown')}</span>
+                    </div>
+                    ${model.size ? `
+                    <div class="model-detail">
+                        <span class="label">Size:</span>
+                        <span class="value">${this.formatFileSize(model.size)}</span>
+                    </div>
+                    ` : ''}
+                </div>
+                <div class="model-description">
+                    ${this.escapeHtml(model.description || '')}
+                </div>
+                <div class="model-actions">
+                    ${model.available ? `
+                        <button class="btn btn-primary btn-sm" onclick="hexarag.useModel('${model.id}')">
+                            Use Model
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="hexarag.confirmDeleteModel('${model.id}')">
+                            Delete
+                        </button>
+                    ` : `
+                        <button class="btn btn-secondary btn-sm" disabled>
+                            Unavailable
+                        </button>
+                    `}
+                </div>
+            </div>
+        `).join('');
+    }
+    
+    renderRunningModels(runningModels) {
+        if (runningModels.length === 0) {
+            this.runningModels.innerHTML = '<div class="empty">No models currently running</div>';
+            return;
+        }
+        
+        this.runningModels.innerHTML = runningModels.map(model => `
+            <div class="running-model">
+                <div class="model-name">${this.escapeHtml(model.name)}</div>
+                <div class="model-stats">
+                    <span>Size: ${this.formatFileSize(model.size_vram)}</span>
+                    <span>Until: ${this.formatTime(model.expires_at)}</span>
+                </div>
+            </div>
+        `).join('');
+    }
+    
+    async pullModelFromSearch() {
+        const modelName = this.modelSearch.value.trim();
+        if (!modelName) {
+            alert('Please enter a model name');
+            return;
+        }
+        
+        try {
+            await this.modelManager.pullModel(modelName);
+            this.addDownloadToQueue(modelName);
+            this.modelSearch.value = '';
+            console.log(`Started pulling model: ${modelName}`);
+        } catch (error) {
+            console.error('Failed to start model pull:', error);
+            alert(`Failed to start downloading ${modelName}: ${error.message}`);
+        }
+    }
+    
+    async useModel(modelId) {
+        try {
+            await this.switchModel(modelId);
+            this.closeModelModal();
+        } catch (error) {
+            console.error('Failed to use model:', error);
+            alert(`Failed to switch to model ${modelId}: ${error.message}`);
+        }
+    }
+    
+    confirmDeleteModel(modelId) {
+        this.confirmTitle.textContent = 'Delete Model';
+        this.confirmMessage.textContent = `Are you sure you want to delete ${modelId}? This action cannot be undone.`;
+        this.confirmOk.onclick = () => this.deleteModel(modelId);
+        this.confirmDialog.style.display = 'flex';
+    }
+    
+    async deleteModel(modelId) {
+        try {
+            await this.modelManager.deleteModel(modelId);
+            this.closeConfirmDialog();
+            this.loadModalContent(); // Refresh modal content
+            console.log(`Deleted model: ${modelId}`);
+        } catch (error) {
+            console.error('Failed to delete model:', error);
+            alert(`Failed to delete model ${modelId}: ${error.message}`);
+        }
+    }
+    
+    closeConfirmDialog() {
+        this.confirmDialog.style.display = 'none';
+        this.confirmOk.onclick = null;
+    }
+    
+    addDownloadToQueue(modelName) {
+        // Show download section
+        this.downloadSection.style.display = 'block';
+        
+        // Add download item
+        const downloadItem = document.createElement('div');
+        downloadItem.className = 'download-item';
+        downloadItem.setAttribute('data-model', modelName);
+        downloadItem.innerHTML = `
+            <div class="download-info">
+                <span class="model-name">${this.escapeHtml(modelName)}</span>
+                <span class="download-status">Starting...</span>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: 0%"></div>
+            </div>
+            <div class="progress-text">0% - Initializing</div>
+        `;
+        
+        this.downloadQueue.appendChild(downloadItem);
+    }
+    
+    updateDownloadQueueUI() {
+        const downloads = Array.from(this.modelManager.downloadQueue.values());
+        
+        if (downloads.length === 0) {
+            this.downloadSection.style.display = 'none';
+            return;
+        }
+        
+        this.downloadSection.style.display = 'block';
+        this.downloadQueue.innerHTML = downloads.map(download => `
+            <div class="download-item" data-model="${download.model}">
+                <div class="download-info">
+                    <span class="model-name">${this.escapeHtml(download.model)}</span>
+                    <span class="download-status">${download.status}</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: ${download.progress}%"></div>
+                </div>
+                <div class="progress-text">${Math.round(download.progress)}% - ${download.status}</div>
+                ${download.error ? `<div class="download-error">Error: ${this.escapeHtml(download.error)}</div>` : ''}
+            </div>
+        `).join('');
+    }
+    
+    formatFileSize(bytes) {
+        if (!bytes) return 'Unknown';
+        
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let size = bytes;
+        let unitIndex = 0;
+        
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+        
+        return `${size.toFixed(1)} ${units[unitIndex]}`;
     }
 }
 

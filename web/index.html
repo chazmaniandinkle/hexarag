@@ -20,6 +20,7 @@
                     <select id="modelSelector" class="model-selector">
                         <option value="deepseek-r1:8b">deepseek-r1:8b</option>
                     </select>
+                    <button id="manageModelsBtn" class="btn btn-secondary">Models</button>
                     <button id="newChatBtn" class="btn btn-secondary">New Chat</button>
                 </div>
             </div>
@@ -88,6 +89,64 @@
     <div class="loading-overlay" id="loadingOverlay">
         <div class="loading-spinner"></div>
         <div class="loading-text">Processing...</div>
+    </div>
+
+    <!-- Model Management Modal -->
+    <div class="modal" id="modelModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Model Management</h2>
+                <button class="btn btn-icon modal-close" id="closeModalBtn">&times;</button>
+            </div>
+            
+            <div class="modal-body">
+                <!-- Model Search -->
+                <div class="model-search">
+                    <input type="text" id="modelSearch" placeholder="Search for models (e.g., llama3.2:3b, deepseek-r1:8b)..." class="search-input">
+                    <button id="pullSearchedModel" class="btn btn-primary">Pull Model</button>
+                </div>
+                
+                <!-- Available Models Grid -->
+                <div class="section">
+                    <h3>Available Models</h3>
+                    <div class="model-grid" id="modelGrid">
+                        <div class="loading">Loading models...</div>
+                    </div>
+                </div>
+                
+                <!-- Download Queue -->
+                <div class="section" id="downloadSection" style="display: none;">
+                    <h3>Downloads</h3>
+                    <div class="download-queue" id="downloadQueue">
+                        <!-- Download items will be added here dynamically -->
+                    </div>
+                </div>
+                
+                <!-- Running Models -->
+                <div class="section">
+                    <h3>Running Models</h3>
+                    <div class="running-models" id="runningModels">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Model Confirmation Dialog -->
+    <div class="modal" id="confirmDialog">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h3 id="confirmTitle">Confirm Action</h3>
+            </div>
+            <div class="modal-body">
+                <p id="confirmMessage">Are you sure?</p>
+            </div>
+            <div class="modal-footer">
+                <button id="confirmCancel" class="btn btn-secondary">Cancel</button>
+                <button id="confirmOk" class="btn btn-danger">Confirm</button>
+            </div>
+        </div>
     </div>
 
     <!-- Scripts -->
