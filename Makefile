@@ -1,6 +1,6 @@
 # HexaRAG Makefile
 
-.PHONY: build run test clean migrate docker-build docker-run deps fmt lint vet setup chat test-model models
+.PHONY: build run test clean migrate docker-build docker-run deps fmt lint vet setup chat test-model models test-chat pull-model reset-db health benchmark dev-setup-full
 
 # Build the application
 build:
@@ -108,12 +108,43 @@ models:
 	@echo "📋 Available models:"
 	@docker-compose -f deployments/docker/docker-compose.yml exec ollama ollama list 2>/dev/null || echo "Ollama container not running"
 
-# Reset database for testing
+# Developer Scripts (Phase 3D)
+
+# Interactive chat testing
+test-chat:
+	@echo "💬 Starting interactive chat test..."
+	@chmod +x scripts/test-chat.sh
+	@./scripts/test-chat.sh
+
+# Pull specific model
+pull-model:
+	@echo "📥 Downloading model..."
+	@chmod +x scripts/pull-model.sh
+	@./scripts/pull-model.sh $(MODEL)
+
+# Reset database with backup
 reset-db:
 	@echo "🗑️ Resetting database..."
-	@docker-compose -f deployments/docker/docker-compose.yml exec hexarag rm -f /data/hexarag.db
-	@docker-compose -f deployments/docker/docker-compose.yml restart hexarag
-	@echo "Database reset complete"
+	@chmod +x scripts/reset-db.sh
+	@./scripts/reset-db.sh
+
+# Comprehensive health check
+health:
+	@echo "🏥 Running system health check..."
+	@chmod +x scripts/health-check.sh
+	@./scripts/health-check.sh
+
+# Performance benchmark
+benchmark:
+	@echo "📊 Running performance benchmark..."
+	@chmod +x scripts/benchmark.sh
+	@./scripts/benchmark.sh
+
+# Complete development environment setup
+dev-setup-full:
+	@echo "🚀 Setting up complete development environment..."
+	@chmod +x scripts/dev-setup.sh
+	@./scripts/dev-setup.sh
 
 # Help
 help:
@@ -149,3 +180,10 @@ help:
 	@echo "  clean          - Clean build artifacts"
 	@echo "  deps           - Install dependencies"
 	@echo "  check-deps     - Check if dependencies are available"
+	@echo ""
+	@echo "🛠️ Developer Scripts (Phase 3D):"
+	@echo "  test-chat      - Interactive chat testing tool"
+	@echo "  pull-model     - Download AI model (use MODEL=name)"
+	@echo "  health         - Comprehensive system health check"
+	@echo "  benchmark      - Performance testing and benchmarking"
+	@echo "  dev-setup-full - Complete development environment setup"
