@@ -15,12 +15,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	httpapi "github.com/username/hexarag/internal/adapters/api/http"
-	"github.com/username/hexarag/internal/adapters/api/websocket"
 	"github.com/username/hexarag/internal/adapters/llm/ollama"
 	"github.com/username/hexarag/internal/adapters/llm/openai"
 	"github.com/username/hexarag/internal/adapters/messaging/nats"
 	"github.com/username/hexarag/internal/adapters/storage/sqlite"
 	"github.com/username/hexarag/internal/adapters/tools/mcp"
+	"github.com/username/hexarag/internal/adapters/websocket"
+	"github.com/username/hexarag/internal/domain/metrics"
 	"github.com/username/hexarag/internal/domain/services"
 	"github.com/username/hexarag/pkg/config"
 )
@@ -125,11 +126,12 @@ func main() {
 		log.Fatalf("Failed to start inference engine: %v", err)
 	}
 
+	// Initialize metrics collector
+	metricsCollector := metrics.NewCollector()
+
 	// Initialize WebSocket hub
-	wsHub := websocket.NewHub(messaging)
-	if err := wsHub.Start(ctx); err != nil {
-		log.Fatalf("Failed to start WebSocket hub: %v", err)
-	}
+	hub := websocket.NewHub()
+	go hub.Run(ctx) // Start hub in background
 
 	// Initialize HTTP server
 	if cfg.Logging.Level == "debug" {
@@ -143,11 +145,11 @@ func main() {
 	router.Use(gin.Recovery())
 
 	// Setup API handlers
-	apiHandlers := httpapi.NewAPIHandlers(storage, messaging, contextConstructor, inferenceEngine, modelManager)
+	apiHandlers := httpapi.NewAPIHandlers(storage, messaging, contextConstructor, inferenceEngine, modelManager, metricsCollector, hub)
 	apiHandlers.SetupRoutes(router)
 
-	// Setup WebSocket endpoint
-	router.GET("/ws", wsHub.HandleWebSocket)
+	// Setup WebSocket endpoint (legacy)
+	router.GET("/ws", hub.HandleWebSocket)
 
 	// Create HTTP server
 	server := &http.Server{
