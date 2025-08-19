@@ -40,6 +40,9 @@ COPY --from=builder /app/migrate .
 COPY --from=builder /app/deployments/config ./config
 COPY --from=builder /app/internal/adapters/storage/sqlite/migrations ./migrations
 
+# Copy web files for dashboard
+COPY --from=builder /app/web ./web
+
 # Create data directory
 RUN mkdir -p /data && chown hexarag:hexarag /data
 
