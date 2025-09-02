@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HexaRAG Developer Dashboard</title>
+    <link rel="stylesheet" href="dashboard.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔧</text></svg>">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/index.min.js"></script>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-content">
+                <h1 class="dashboard-title">
+                    <span class="logo">🔧</span>
+                    HexaRAG Developer Dashboard
+                </h1>
+                <div class="status-bar">
+                    <div class="status-item" id="apiStatus">
+                        <span class="status-dot"></span>
+                        <span class="status-label">API</span>
+                    </div>
+                    <div class="status-item" id="ollamaStatus">
+                        <span class="status-dot"></span>
+                        <span class="status-label">Ollama</span>
+                    </div>
+                    <div class="status-item" id="natsStatus">
+                        <span class="status-dot"></span>
+                        <span class="status-label">NATS</span>
+                    </div>
+                    <div class="status-item" id="dbStatus">
+                        <span class="status-dot"></span>
+                        <span class="status-label">Database</span>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-icon" id="refreshBtn" title="Refresh All">
+                        <span>🔄</span>
+                    </button>
+                    <button class="btn btn-icon" id="settingsBtn" title="Settings">
+                        <span>⚙️</span>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="dashboard-nav">
+            <button class="nav-tab active" data-tab="overview">
+                <span class="tab-icon">📊</span>
+                Overview
+            </button>
+            <button class="nav-tab" data-tab="scripts">
+                <span class="tab-icon">🛠️</span>
+                Scripts
+            </button>
+            <button class="nav-tab" data-tab="models">
+                <span class="tab-icon">🤖</span>
+                Models
+            </button>
+            <button class="nav-tab" data-tab="console">
+                <span class="tab-icon">💻</span>
+                Console
+            </button>
+            <button class="nav-tab" data-tab="logs">
+                <span class="tab-icon">📜</span>
+                Logs
+            </button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="dashboard-main">
+            <!-- Overview Tab -->
+            <div class="tab-content active" id="overview-tab">
+                <div class="metrics-grid">
+                    <!-- Quick Actions Card -->
+                    <div class="metric-card quick-actions">
+                        <h3>Quick Actions</h3>
+                        <div class="action-buttons">
+                            <button class="btn btn-primary" id="quickSetupBtn">
+                                <span>🚀</span>
+                                Quick Setup
+                            </button>
+                            <button class="btn btn-secondary" id="healthCheckBtn">
+                                <span>🏥</span>
+                                Health Check
+                            </button>
+                            <button class="btn btn-secondary" id="benchmarkBtn">
+                                <span>📊</span>
+                                Benchmark
+                            </button>
+                            <button class="btn btn-secondary" id="resetDbBtn">
+                                <span>🗑️</span>
+                                Reset DB
+                            </button>
+                        </div>
+                        <div class="progress-indicator" id="setupProgress" style="display: none;">
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: 0%"></div>
+                            </div>
+                            <div class="progress-text">Setting up...</div>
+                        </div>
+                    </div>
+
+                    <!-- System Health -->
+                    <div class="metric-card">
+                        <h3>System Health</h3>
+                        <div class="health-grid">
+                            <div class="health-item">
+                                <span class="health-label">Uptime</span>
+                                <span class="health-value" id="systemUptime">--</span>
+                            </div>
+                            <div class="health-item">
+                                <span class="health-label">Memory</span>
+                                <span class="health-value" id="memoryUsage">--</span>
+                            </div>
+                            <div class="health-item">
+                                <span class="health-label">CPU</span>
+                                <span class="health-value" id="cpuUsage">--</span>
+                            </div>
+                            <div class="health-item">
+                                <span class="health-label">Requests/min</span>
+                                <span class="health-value" id="requestRate">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- WebSocket Connections -->
+                    <div class="metric-card">
+                        <h3>Active Connections</h3>
+                        <div class="connection-stats">
+                            <div class="stat-item">
+                                <div class="stat-value" id="wsConnections">0</div>
+                                <div class="stat-label">WebSocket</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-value" id="activeConversations">0</div>
+                                <div class="stat-label">Conversations</div>
+                            </div>
+                        </div>
+                        <div class="connection-list" id="connectionList">
+                            <!-- Connection items will be populated here -->
+                        </div>
+                    </div>
+
+                    <!-- Performance Chart -->
+                    <div class="metric-card wide">
+                        <h3>Response Times (Last Hour)</h3>
+                        <div class="chart-container">
+                            <canvas id="performanceChart"></canvas>
+                        </div>
+                        <div class="performance-stats">
+                            <div class="stat">
+                                <span class="stat-label">Avg:</span>
+                                <span class="stat-value" id="avgResponseTime">--ms</span>
+                            </div>
+                            <div class="stat">
+                                <span class="stat-label">P95:</span>
+                                <span class="stat-value" id="p95ResponseTime">--ms</span>
+                            </div>
+                            <div class="stat">
+                                <span class="stat-label">P99:</span>
+                                <span class="stat-value" id="p99ResponseTime">--ms</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Message Flow -->
+                    <div class="metric-card">
+                        <h3>Message Flow</h3>
+                        <div class="chart-container small">
+                            <canvas id="messageFlowChart"></canvas>
+                        </div>
+                        <div class="flow-stats">
+                            <div class="flow-item">
+                                <span class="flow-label">Total Messages</span>
+                                <span class="flow-value" id="totalMessages">0</span>
+                            </div>
+                            <div class="flow-item">
+                                <span class="flow-label">Messages/min</span>
+                                <span class="flow-value" id="messageRate">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Model Usage -->
+                    <div class="metric-card">
+                        <h3>Model Usage</h3>
+                        <div class="model-stats">
+                            <div class="current-model">
+                                <span class="model-label">Active Model:</span>
+                                <span class="model-name" id="activeModel">--</span>
+                            </div>
+                            <div class="usage-stats">
+                                <div class="usage-item">
+                                    <span class="usage-label">Inferences</span>
+                                    <span class="usage-value" id="totalInferences">0</span>
+                                </div>
+                                <div class="usage-item">
+                                    <span class="usage-label">Avg Duration</span>
+                                    <span class="usage-value" id="avgInferenceDuration">--ms</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scripts Tab -->
+            <div class="tab-content" id="scripts-tab">
+                <div class="scripts-grid">
+                    <!-- Test Chat Script -->
+                    <div class="script-card">
+                        <div class="script-header">
+                            <h4>💬 Interactive Chat Testing</h4>
+                            <span class="script-status available">Available</span>
+                        </div>
+                        <p class="script-description">CLI tool for testing conversations with real-time interaction</p>
+                        <div class="script-options">
+                            <label>
+                                Model:
+                                <select class="script-input" id="chatModel">
+                                    <option value="deepseek-r1:8b">deepseek-r1:8b</option>
+                                    <option value="llama3.2:3b">llama3.2:3b</option>
+                                </select>
+                            </label>
+                            <label>
+                                <input type="checkbox" id="chatExtended"> Extended Knowledge
+                            </label>
+                            <label>
+                                <input type="checkbox" id="chatVerbose"> Verbose Mode
+                            </label>
+                        </div>
+                        <div class="script-actions">
+                            <button class="btn btn-primary" onclick="runScript('test-chat')">
+                                <span>▶️</span> Run Script
+                            </button>
+                            <button class="btn btn-secondary" onclick="showScriptHelp('test-chat')">
+                                <span>❓</span> Help
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Model Download Script -->
+                    <div class="script-card">
+                        <div class="script-header">
+                            <h4>📥 Model Download</h4>
+                            <span class="script-status available">Available</span>
+                        </div>
+                        <p class="script-description">Download and manage AI models with progress tracking</p>
+                        <div class="script-options">
+                            <label>
+                                Model Name:
+                                <input type="text" class="script-input" id="downloadModel" placeholder="e.g., llama3.2:3b">
+                            </label>
+                            <label>
+                                Timeout (seconds):
+                                <input type="number" class="script-input" id="downloadTimeout" value="300" min="60" max="3600">
+                            </label>
+                        </div>
+                        <div class="script-actions">
+                            <button class="btn btn-primary" onclick="runScript('pull-model')">
+                                <span>⬇️</span> Download
+                            </button>
+                            <button class="btn btn-secondary" onclick="runScript('list-models')">
+                                <span>📋</span> List Models
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Health Check Script -->
+                    <div class="script-card">
+                        <div class="script-header">
+                            <h4>🏥 System Health Check</h4>
+                            <span class="script-status available">Available</span>
+                        </div>
+                        <p class="script-description">Comprehensive health verification for all system components</p>
+                        <div class="script-options">
+                            <label>
+                                <input type="checkbox" id="healthDetailed"> Detailed Output
+                            </label>
+                            <label>
+                                <input type="checkbox" id="healthVerbose"> Verbose Mode
+                            </label>
+                            <label>
+                                Timeout:
+                                <select class="script-input" id="healthTimeout">
+                                    <option value="5">5 seconds</option>
+                                    <option value="10" selected>10 seconds</option>
+                                    <option value="30">30 seconds</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="script-actions">
+                            <button class="btn btn-primary" onclick="runScript('health-check')">
+                                <span>🔍</span> Check Health
+                            </button>
+                            <button class="btn btn-secondary" onclick="runScript('health-continuous')">
+                                <span>🔄</span> Continuous
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Benchmark Script -->
+                    <div class="script-card">
+                        <div class="script-header">
+                            <h4>📊 Performance Benchmark</h4>
+                            <span class="script-status available">Available</span>
+                        </div>
+                        <p class="script-description">Performance testing and load analysis</p>
+                        <div class="script-options">
+                            <label>
+                                Test Type:
+                                <select class="script-input" id="benchmarkType">
+                                    <option value="conversation">Conversation</option>
+                                    <option value="load">Load Test</option>
+                                    <option value="stress">Stress Test</option>
+                                </select>
+                            </label>
+                            <label>
+                                Concurrent Users:
+                                <input type="number" class="script-input" id="benchmarkUsers" value="1" min="1" max="50">
+                            </label>
+                            <label>
+                                Requests per User:
+                                <input type="number" class="script-input" id="benchmarkRequests" value="10" min="1" max="100">
+                            </label>
+                        </div>
+                        <div class="script-actions">
+                            <button class="btn btn-primary" onclick="runScript('benchmark')">
+                                <span>🚀</span> Run Benchmark
+                            </button>
+                            <button class="btn btn-secondary" onclick="exportBenchmarkResults()">
+                                <span>📊</span> Export Results
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Database Reset Script -->
+                    <div class="script-card">
+                        <div class="script-header">
+                            <h4>🗑️ Database Reset</h4>
+                            <span class="script-status warning">Destructive</span>
+                        </div>
+                        <p class="script-description">Reset database with backup and restore capabilities</p>
+                        <div class="script-options">
+                            <label>
+                                <input type="checkbox" id="resetBackup" checked> Create Backup
+                            </label>
+                            <label>
+                                <input type="checkbox" id="resetTestData"> Load Test Data
+                            </label>
+                            <label>
+                                <input type="checkbox" id="resetForce"> Force (No Confirmation)
+                            </label>
+                        </div>
+                        <div class="script-actions">
+                            <button class="btn btn-danger" onclick="runScript('reset-db')">
+                                <span>🗑️</span> Reset Database
+                            </button>
+                            <button class="btn btn-secondary" onclick="showBackups()">
+                                <span>💾</span> View Backups
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Development Setup Script -->
+                    <div class="script-card">
+                        <div class="script-header">
+                            <h4>🚀 Development Setup</h4>
+                            <span class="script-status available">Available</span>
+                        </div>
+                        <p class="script-description">Complete development environment initialization</p>
+                        <div class="script-options">
+                            <label>
+                                <input type="checkbox" id="setupModels" checked> Download Models
+                            </label>
+                            <label>
+                                <input type="checkbox" id="setupServices" checked> Start Services
+                            </label>
+                            <label>
+                                <input type="checkbox" id="setupDatabase" checked> Initialize Database
+                            </label>
+                        </div>
+                        <div class="script-actions">
+                            <button class="btn btn-primary" onclick="runScript('dev-setup')">
+                                <span>🛠️</span> Setup Environment
+                            </button>
+                            <button class="btn btn-secondary" onclick="checkDependencies()">
+                                <span>🔍</span> Check Dependencies
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Models Tab -->
+            <div class="tab-content" id="models-tab">
+                <div class="models-container">
+                    <div class="models-header">
+                        <h3>Model Management</h3>
+                        <div class="models-actions">
+                            <button class="btn btn-primary" id="refreshModelsBtn">
+                                <span>🔄</span> Refresh
+                            </button>
+                            <button class="btn btn-secondary" id="downloadModelBtn">
+                                <span>⬇️</span> Download Model
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="models-grid" id="modelsGrid">
+                        <!-- Models will be populated here -->
+                    </div>
+                    
+                    <div class="download-queue" id="downloadQueue" style="display: none;">
+                        <h4>Download Queue</h4>
+                        <div class="queue-items" id="queueItems">
+                            <!-- Download items will be populated here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Console Tab -->
+            <div class="tab-content" id="console-tab">
+                <div class="console-container">
+                    <div class="console-header">
+                        <h3>Development Console</h3>
+                        <div class="console-actions">
+                            <button class="btn btn-secondary" id="clearConsoleBtn">
+                                <span>🧹</span> Clear
+                            </button>
+                            <button class="btn btn-secondary" id="exportConsoleBtn">
+                                <span>📄</span> Export
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="console-output" id="consoleOutput">
+                        <div class="console-line welcome">
+                            <span class="console-prompt">$</span>
+                            <span class="console-text">Welcome to HexaRAG Developer Console</span>
+                        </div>
+                        <div class="console-line info">
+                            <span class="console-prompt">ℹ</span>
+                            <span class="console-text">Type commands below or use the Scripts tab for GUI options</span>
+                        </div>
+                    </div>
+                    
+                    <div class="console-input-container">
+                        <span class="console-prompt">$</span>
+                        <input type="text" class="console-input" id="consoleInput" placeholder="Enter command..." autocomplete="off">
+                        <button class="btn btn-primary" id="executeCommandBtn">Execute</button>
+                    </div>
+                    
+                    <div class="command-suggestions" id="commandSuggestions">
+                        <div class="suggestion-group">
+                            <h5>Common Commands:</h5>
+                            <button class="suggestion-btn" data-command="make health">make health</button>
+                            <button class="suggestion-btn" data-command="make test-chat">make test-chat</button>
+                            <button class="suggestion-btn" data-command="make pull-model MODEL=llama3.2:3b">make pull-model MODEL=llama3.2:3b</button>
+                            <button class="suggestion-btn" data-command="make benchmark">make benchmark</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Logs Tab -->
+            <div class="tab-content" id="logs-tab">
+                <div class="logs-container">
+                    <div class="logs-header">
+                        <h3>System Logs</h3>
+                        <div class="logs-controls">
+                            <select class="logs-filter" id="logLevel">
+                                <option value="all">All Levels</option>
+                                <option value="error">Error</option>
+                                <option value="warn">Warning</option>
+                                <option value="info" selected>Info</option>
+                                <option value="debug">Debug</option>
+                            </select>
+                            <input type="text" class="logs-search" id="logSearch" placeholder="Search logs...">
+                            <button class="btn btn-secondary" id="clearLogsBtn">Clear</button>
+                            <button class="btn btn-secondary" id="exportLogsBtn">Export</button>
+                        </div>
+                    </div>
+                    
+                    <div class="logs-content" id="logsContent">
+                        <div class="log-entry info">
+                            <span class="log-timestamp">[12:34:56]</span>
+                            <span class="log-level info">INFO</span>
+                            <span class="log-message">Dashboard initialized successfully</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal for Script Output -->
+    <div class="modal" id="scriptModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="scriptModalTitle">Script Output</h3>
+                <button class="btn btn-icon modal-close" id="closeScriptModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="script-output" id="scriptOutput">
+                    <!-- Script output will be shown here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="copyScriptOutput">Copy Output</button>
+                <button class="btn btn-secondary" id="downloadScriptOutput">Download Log</button>
+                <button class="btn btn-primary modal-close">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="dashboard.js"></script>
+</body>
+</html>

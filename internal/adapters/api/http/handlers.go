@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/username/hexarag/internal/domain/entities"
 	"github.com/username/hexarag/internal/domain/ports"
 	"github.com/username/hexarag/internal/domain/services"
+	"github.com/username/hexarag/internal/domain/metrics"
+	"github.com/username/hexarag/internal/adapters/websocket"
 )
 
 // APIHandlers contains all HTTP API handlers
@@ -22,16 +25,20 @@ type APIHandlers struct {
 	contextConstructor *services.ContextConstructor
 	inferenceEngine    *services.InferenceEngine
 	modelManager       *services.ModelManager
+	metricsCollector   *metrics.Collector
+	wsHub              *websocket.Hub
 }
 
 // NewAPIHandlers creates a new API handlers instance
-func NewAPIHandlers(storage ports.StoragePort, messaging ports.MessagingPort, cc *services.ContextConstructor, ie *services.InferenceEngine, mm *services.ModelManager) *APIHandlers {
+func NewAPIHandlers(storage ports.StoragePort, messaging ports.MessagingPort, cc *services.ContextConstructor, ie *services.InferenceEngine, mm *services.ModelManager, mc *metrics.Collector, hub *websocket.Hub) *APIHandlers {
 	return &APIHandlers{
 		storage:            storage,
 		messaging:          messaging,
 		contextConstructor: cc,
 		inferenceEngine:    ie,
 		modelManager:       mm,
+		metricsCollector:   mc,
+		wsHub:              hub,
 	}
 }
 
@@ -86,6 +93,20 @@ func (h *APIHandlers) SetupRoutes(r *gin.Engine) {
 		api.PUT("/models/current", h.switchModel)
 		api.DELETE("/models/:id", h.deleteModel)
 		api.GET("/models/status", h.getModelStatus)
+
+		// System metrics and health for developer dashboard
+		api.GET("/system/health", h.getSystemHealth)
+		api.GET("/system/metrics", h.getSystemMetrics)
+		api.GET("/system/connections", h.getSystemConnections)
+	}
+
+	// Developer dashboard routes
+	dev := r.Group("/dev")
+	{
+		dev.Static("/static", "./web/dev")
+		dev.StaticFile("/", "./web/dev/index.html")
+		dev.GET("/events", h.handleDevEvents)
+		dev.POST("/scripts/execute", h.executeScript)
 	}
 
 	// Serve static files for the web UI
@@ -662,4 +683,156 @@ func (h *APIHandlers) getModelStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, status)
+}
+
+// Developer dashboard handlers
+
+func (h *APIHandlers) getSystemHealth(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	health := gin.H{
+		"api":      "healthy",
+		"ollama":   "unknown",
+		"nats":     "unknown", 
+		"database": "unknown",
+		"uptime":   0,
+		"memory_usage": "--",
+		"cpu_usage": "--",
+		"requests_per_minute": 0,
+		"timestamp": time.Now(),
+	}
+
+	// Check storage connectivity
+	if err := h.storage.Ping(ctx); err != nil {
+		health["database"] = "error"
+	} else {
+		health["database"] = "healthy"
+	}
+
+	// Check messaging connectivity
+	if err := h.messaging.Ping(); err != nil {
+		health["nats"] = "error"
+	} else {
+		health["nats"] = "healthy"
+	}
+
+	// Check Ollama connectivity by trying to list models
+	if _, err := h.modelManager.GetAvailableModels(ctx); err != nil {
+		health["ollama"] = "error"
+	} else {
+		health["ollama"] = "healthy"
+	}
+
+	c.JSON(http.StatusOK, health)
+}
+
+func (h *APIHandlers) getSystemMetrics(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	metrics := gin.H{
+		"avg_response_time": 250,
+		"p95_response_time": 500,
+		"p99_response_time": 800,
+		"response_times": []int{200, 180, 250, 300, 220, 190, 280, 260, 240, 210},
+		"message_flow": gin.H{
+			"sent": 150,
+			"received": 145,
+			"processing": 5,
+		},
+		"timestamp": time.Now(),
+	}
+
+	// If metrics collector is available, get real metrics
+	if h.metricsCollector != nil {
+		if realMetrics := h.metricsCollector.GetSystemMetrics(ctx); realMetrics != nil {
+			metrics = gin.H(realMetrics)
+		}
+	}
+
+	c.JSON(http.StatusOK, metrics)
+}
+
+func (h *APIHandlers) getSystemConnections(c *gin.Context) {
+	stats := h.wsHub.GetStats()
+	
+	connections := gin.H{
+		"websocket": stats["total_connections"],
+		"active_conversations": 0, // TODO: Implement conversation tracking
+		"details": []gin.H{},
+		"rooms": stats["rooms"],
+		"timestamp": time.Now(),
+	}
+
+	c.JSON(http.StatusOK, connections)
+}
+
+func (h *APIHandlers) handleDevEvents(c *gin.Context) {
+	// Set room to "dev-dashboard" for developer dashboard connections
+	c.Request.URL.RawQuery = "room=dev-dashboard"
+	h.wsHub.HandleWebSocket(c)
+}
+
+func (h *APIHandlers) executeScript(c *gin.Context) {
+	var req struct {
+		Script string   `json:"script" binding:"required"`
+		Args   []string `json:"args"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate script path for security
+	allowedScripts := map[string]string{
+		"health-check": "./scripts/health-check.sh",
+		"test-chat":    "./scripts/test-chat.sh",
+		"pull-model":   "./scripts/pull-model.sh",
+		"benchmark":    "./scripts/benchmark.sh",
+		"reset-db":     "./scripts/reset-db.sh",
+		"dev-setup":    "./scripts/dev-setup.sh",
+	}
+
+	scriptPath, exists := allowedScripts[req.Script]
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Script not allowed"})
+		return
+	}
+
+	// Prepare command
+	args := append([]string{}, req.Args...)
+	cmd := exec.Command(scriptPath, args...)
+
+	// Capture output
+	output, err := cmd.CombinedOutput()
+	success := err == nil
+
+	result := gin.H{
+		"script":    req.Script,
+		"output":    string(output),
+		"success":   success,
+		"timestamp": time.Now(),
+	}
+
+	if err != nil {
+		result["error"] = err.Error()
+	}
+
+	// Broadcast script execution event via WebSocket
+	if h.wsHub != nil {
+		event := websocket.Event{
+			Type: "script_executed",
+			Data: map[string]interface{}{
+				"script":  req.Script,
+				"success": success,
+				"output":  string(output),
+			},
+			Timestamp: time.Now(),
+		}
+		h.wsHub.BroadcastToRoom("dev-dashboard", event)
+	}
+
+	c.JSON(http.StatusOK, result)
 }
