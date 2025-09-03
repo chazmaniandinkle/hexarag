@@ -6,7 +6,7 @@ import (
 
 	"github.com/pkoukk/tiktoken-go"
 
-	"github.com/username/hexarag/internal/domain/entities"
+	"hexarag/internal/domain/entities"
 )
 
 // Tokenizer provides token counting functionality

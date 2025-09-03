@@ -6,7 +6,7 @@ server:
 nats:
   url: "nats://localhost:4222"
   jetstream:
-    enabled: false  # Disable for now since we may not have NATS running
+    enabled: true  # Enable with JetStream server running
     retention_days: 7
 
 database:
@@ -17,7 +17,7 @@ llm:
   provider: "openai-compatible"
   base_url: "http://localhost:11434/v1"  # Ollama default
   api_key: "dummy"
-  model: "llama2"
+  model: "qwen3:0.6b"
   max_tokens: 4096
   temperature: 0.7
 

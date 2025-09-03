@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/username/hexarag/internal/adapters/llm/ollama"
-	"github.com/username/hexarag/internal/domain/ports"
+	"hexarag/internal/adapters/llm/ollama"
+	"hexarag/internal/domain/ports"
 )
 
 // MockOllamaClient implements a mock Ollama client for testing

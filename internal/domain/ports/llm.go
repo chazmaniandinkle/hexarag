@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/username/hexarag/internal/domain/entities"
+	"hexarag/internal/domain/entities"
 )
 
 // LLMPort defines the interface for Language Model operations

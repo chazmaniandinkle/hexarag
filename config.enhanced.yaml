@@ -1,0 +1,100 @@
+# HexaRAG Configuration
+# This configuration eliminates hardcoded values and provides sensible defaults
+
+server:
+  port: ${HEXARAG_PORT:-8080}
+  host: ${HEXARAG_HOST:-0.0.0.0}
+  cors_enabled: ${HEXARAG_CORS_ENABLED:-true}
+  read_timeout: ${HEXARAG_READ_TIMEOUT:-30s}
+  write_timeout: ${HEXARAG_WRITE_TIMEOUT:-30s}
+  idle_timeout: ${HEXARAG_IDLE_TIMEOUT:-120s}
+
+# Database configuration with environment variable overrides
+database:
+  type: ${HEXARAG_DB_TYPE:-sqlite}
+  path: ${HEXARAG_DB_PATH:-./data/hexarag.db}
+  migrations_path: ${HEXARAG_MIGRATIONS_PATH:-./internal/adapters/storage/sqlite/migrations}
+  max_open_conns: ${HEXARAG_DB_MAX_OPEN_CONNS:-25}
+  max_idle_conns: ${HEXARAG_DB_MAX_IDLE_CONNS:-25}
+  conn_max_lifetime: ${HEXARAG_DB_CONN_MAX_LIFETIME:-5m}
+
+# NATS messaging configuration
+nats:
+  url: ${HEXARAG_NATS_URL:-nats://localhost:4222}
+  jetstream:
+    enabled: ${HEXARAG_JETSTREAM_ENABLED:-true}
+    retention_days: ${HEXARAG_JETSTREAM_RETENTION_DAYS:-7}
+    max_memory: ${HEXARAG_JETSTREAM_MAX_MEMORY:-1GB}
+    max_file_storage: ${HEXARAG_JETSTREAM_MAX_FILE_STORAGE:-10GB}
+
+# LLM configuration with provider flexibility
+llm:
+  provider: ${HEXARAG_LLM_PROVIDER:-openai-compatible}
+  base_url: ${HEXARAG_LLM_BASE_URL:-http://localhost:11434/v1}
+  api_key: ${HEXARAG_LLM_API_KEY:-dummy}
+  model: ${HEXARAG_LLM_MODEL:-qwen3:0.6b}
+  max_tokens: ${HEXARAG_LLM_MAX_TOKENS:-4096}
+  temperature: ${HEXARAG_LLM_TEMPERATURE:-0.7}
+  timeout: ${HEXARAG_LLM_TIMEOUT:-30s}
+  retry_attempts: ${HEXARAG_LLM_RETRY_ATTEMPTS:-3}
+  retry_delay: ${HEXARAG_LLM_RETRY_DELAY:-1s}
+
+# Tools configuration
+tools:
+  mcp_time_server:
+    enabled: ${HEXARAG_TOOLS_TIME_SERVER_ENABLED:-true}
+    timezones:
+      - ${HEXARAG_TIMEZONE_1:-UTC}
+      - ${HEXARAG_TIMEZONE_2:-America/New_York}
+      - ${HEXARAG_TIMEZONE_3:-Europe/London}
+
+# Logging configuration
+logging:
+  level: ${HEXARAG_LOG_LEVEL:-info}
+  format: ${HEXARAG_LOG_FORMAT:-text}
+  output: ${HEXARAG_LOG_OUTPUT:-stdout}
+  service_name: ${HEXARAG_SERVICE_NAME:-hexarag}
+  enable_caller: ${HEXARAG_LOG_ENABLE_CALLER:-false}
+
+# HTTP utilities configuration
+http:
+  timeouts:
+    default: ${HEXARAG_HTTP_TIMEOUT_DEFAULT:-10s}
+    short: ${HEXARAG_HTTP_TIMEOUT_SHORT:-5s}
+    long: ${HEXARAG_HTTP_TIMEOUT_LONG:-30s}
+  pagination:
+    default_limit: ${HEXARAG_PAGINATION_DEFAULT_LIMIT:-20}
+    max_limit: ${HEXARAG_PAGINATION_MAX_LIMIT:-100}
+  cors:
+    allowed_origins:
+      - ${HEXARAG_CORS_ALLOWED_ORIGIN_1:-*}
+    allowed_methods:
+      - ${HEXARAG_CORS_ALLOWED_METHOD_1:-GET}
+      - ${HEXARAG_CORS_ALLOWED_METHOD_2:-POST}
+      - ${HEXARAG_CORS_ALLOWED_METHOD_3:-PUT}
+      - ${HEXARAG_CORS_ALLOWED_METHOD_4:-DELETE}
+      - ${HEXARAG_CORS_ALLOWED_METHOD_5:-OPTIONS}
+    allowed_headers:
+      - ${HEXARAG_CORS_ALLOWED_HEADER_1:-Content-Type}
+      - ${HEXARAG_CORS_ALLOWED_HEADER_2:-Authorization}
+
+# Service orchestration configuration
+orchestrator:
+  default_model: ${HEXARAG_ORCHESTRATOR_DEFAULT_MODEL:-qwen3:0.6b}
+  default_max_tokens: ${HEXARAG_ORCHESTRATOR_DEFAULT_MAX_TOKENS:-4096}
+  default_temperature: ${HEXARAG_ORCHESTRATOR_DEFAULT_TEMPERATURE:-0.7}
+  enable_tools: ${HEXARAG_ORCHESTRATOR_ENABLE_TOOLS:-false}
+  timeout: ${HEXARAG_ORCHESTRATOR_TIMEOUT:-30s}
+
+# Health check configuration
+health:
+  storage_timeout: ${HEXARAG_HEALTH_STORAGE_TIMEOUT:-5s}
+  messaging_timeout: ${HEXARAG_HEALTH_MESSAGING_TIMEOUT:-5s}
+  check_interval: ${HEXARAG_HEALTH_CHECK_INTERVAL:-30s}
+
+# Development configuration
+development:
+  enable_dev_dashboard: ${HEXARAG_DEV_DASHBOARD_ENABLED:-true}
+  enable_metrics: ${HEXARAG_METRICS_ENABLED:-true}
+  enable_profiling: ${HEXARAG_PROFILING_ENABLED:-false}
+  debug_mode: ${HEXARAG_DEBUG_MODE:-false}

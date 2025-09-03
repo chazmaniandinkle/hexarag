@@ -1,4 +1,4 @@
-module github.com/username/hexarag
+module hexarag
 
 go 1.24.4
 
@@ -10,6 +10,7 @@ require (
 	github.com/pkoukk/tiktoken-go v0.1.7
 	github.com/sashabaranov/go-openai v1.41.1
 	github.com/spf13/viper v1.20.1
+	github.com/stretchr/testify v1.10.0
 )
 
 require (
@@ -17,6 +18,7 @@ require (
 	github.com/bytedance/sonic/loader v0.1.1 // indirect
 	github.com/cloudwego/base64x v0.1.4 // indirect
 	github.com/cloudwego/iasm v0.2.0 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
@@ -37,6 +39,7 @@ require (
 	github.com/nats-io/nkeys v0.4.11 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.3 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/sagikazarmark/locafero v0.7.0 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
 	github.com/spf13/afero v1.12.0 // indirect

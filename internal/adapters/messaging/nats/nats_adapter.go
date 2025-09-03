@@ -10,7 +10,9 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/username/hexarag/internal/domain/ports"
+	"hexarag/internal/domain/ports"
+	"hexarag/internal/pkg/constants"
+	"hexarag/internal/pkg/logutil"
 )
 
 // Adapter implements the MessagingPort interface using NATS
@@ -19,47 +21,121 @@ type Adapter struct {
 	js        nats.JetStreamContext
 	subs      map[string]*nats.Subscription
 	subsMutex sync.RWMutex
+	logger    *logutil.FieldLogger
+	config    Config
+}
+
+// Config holds NATS adapter configuration
+type Config struct {
+	URL              string
+	JetStreamEnabled bool
+	RetentionDays    int
+	ReconnectWait    time.Duration
+	MaxReconnects    int
+	ReconnectBufSize int
+	PublishTimeout   time.Duration
+	RequestTimeout   time.Duration
+	MaxStreamMsgs    int64
+	MaxStreamBytes   int64
+}
+
+// DefaultConfig provides sensible NATS defaults
+var DefaultConfig = Config{
+	ReconnectWait:    constants.DefaultHTTPTimeout / 5, // 2 seconds
+	MaxReconnects:    -1,                               // Unlimited
+	ReconnectBufSize: 5 * 1024 * 1024,                  // 5MB
+	PublishTimeout:   constants.MessagingTimeout,
+	RequestTimeout:   constants.DefaultHTTPTimeout,
+	MaxStreamMsgs:    100000,
+	MaxStreamBytes:   1024 * 1024 * 1024, // 1GB
 }
 
 // NewAdapter creates a new NATS messaging adapter
 func NewAdapter(url string, jsEnabled bool, retentionDays int) (*Adapter, error) {
-	// Connect to NATS
-	conn, err := nats.Connect(url,
-		nats.ReconnectWait(2*time.Second),
-		nats.MaxReconnects(-1),
-		nats.ReconnectBufSize(5*1024*1024),
-		nats.Name("hexarag-messaging"),
+	config := DefaultConfig
+	config.URL = url
+	config.JetStreamEnabled = jsEnabled
+	config.RetentionDays = retentionDays
+
+	return NewAdapterWithConfig(config)
+}
+
+// NewAdapterWithConfig creates a new NATS messaging adapter with custom configuration
+func NewAdapterWithConfig(config Config) (*Adapter, error) {
+	// Create logger for this adapter
+	logger := logutil.NewDefaultLogger().WithFields(logutil.Fields{
+		"component": "nats_adapter",
+		"url":       config.URL,
+		"jetstream": config.JetStreamEnabled,
+	})
+
+	logger.Info("Initializing NATS adapter")
+
+	// Connect to NATS with configuration
+	conn, err := nats.Connect(config.URL,
+		nats.ReconnectWait(config.ReconnectWait),
+		nats.MaxReconnects(config.MaxReconnects),
+		nats.ReconnectBufSize(config.ReconnectBufSize),
+		nats.Name(constants.ServiceName+"-messaging"),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			logger.Info("NATS reconnected", logutil.Fields{
+				"url": nc.ConnectedUrl(),
+			})
+		}),
+		nats.DisconnectHandler(func(nc *nats.Conn) {
+			logger.Warn("NATS disconnected")
+		}),
+		nats.ErrorHandler(func(nc *nats.Conn, s *nats.Subscription, err error) {
+			logger.Error("NATS error", logutil.Fields{
+				"subject": s.Subject,
+				"error":   err.Error(),
+			})
+		}),
 	)
 	if err != nil {
+		logger.Error("Failed to connect to NATS", logutil.Fields{
+			"error": err.Error(),
+		})
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
 	adapter := &Adapter{
-		conn: conn,
-		subs: make(map[string]*nats.Subscription),
+		conn:   conn,
+		subs:   make(map[string]*nats.Subscription),
+		logger: logger,
+		config: config,
 	}
 
 	// Setup JetStream if enabled
-	if jsEnabled {
+	if config.JetStreamEnabled {
 		js, err := conn.JetStream(nats.PublishAsyncMaxPending(256))
 		if err != nil {
 			conn.Close()
+			logger.Error("Failed to get JetStream context", logutil.Fields{
+				"error": err.Error(),
+			})
 			return nil, fmt.Errorf("failed to get JetStream context: %w", err)
 		}
 		adapter.js = js
 
 		// Create streams
-		if err := adapter.setupStreams(retentionDays); err != nil {
+		if err := adapter.setupStreams(); err != nil {
 			conn.Close()
+			logger.Error("Failed to setup JetStream streams", logutil.Fields{
+				"error": err.Error(),
+			})
 			return nil, fmt.Errorf("failed to setup JetStream streams: %w", err)
 		}
 	}
 
+	logger.Info("NATS adapter initialized successfully")
 	return adapter, nil
 }
 
 // setupStreams creates the necessary JetStream streams
-func (a *Adapter) setupStreams(retentionDays int) error {
+func (a *Adapter) setupStreams() error {
+	a.logger.Info("Setting up JetStream streams")
+
 	streams := []struct {
 		name     string
 		subjects []string
@@ -91,9 +167,9 @@ func (a *Adapter) setupStreams(retentionDays int) error {
 			Name:        stream.name,
 			Subjects:    stream.subjects,
 			Retention:   nats.LimitsPolicy,
-			MaxAge:      time.Duration(retentionDays) * 24 * time.Hour,
-			MaxMsgs:     100000,
-			MaxBytes:    1024 * 1024 * 1024, // 1GB
+			MaxAge:      time.Duration(a.config.RetentionDays) * 24 * time.Hour,
+			MaxMsgs:     a.config.MaxStreamMsgs,
+			MaxBytes:    a.config.MaxStreamBytes,
 			Storage:     nats.FileStorage,
 			Compression: nats.S2Compression,
 		}
@@ -105,27 +181,46 @@ func (a *Adapter) setupStreams(retentionDays int) error {
 				// Create new stream
 				_, err = a.js.AddStream(cfg)
 				if err != nil {
+					a.logger.Error("Failed to create stream", logutil.Fields{
+						"stream": stream.name,
+						"error":  err.Error(),
+					})
 					return fmt.Errorf("failed to create stream %s: %w", stream.name, err)
 				}
+				a.logger.Debug("Stream created successfully", logutil.Fields{
+					"stream": stream.name,
+				})
 			} else {
+				a.logger.Error("Failed to get stream info", logutil.Fields{
+					"stream": stream.name,
+					"error":  err.Error(),
+				})
 				return fmt.Errorf("failed to get stream info for %s: %w", stream.name, err)
 			}
 		} else {
 			// Update existing stream if configuration changed
-			if needsUpdate(info.Config, *cfg) {
+			if a.needsUpdate(info.Config, *cfg) {
 				_, err = a.js.UpdateStream(cfg)
 				if err != nil {
+					a.logger.Error("Failed to update stream", logutil.Fields{
+						"stream": stream.name,
+						"error":  err.Error(),
+					})
 					return fmt.Errorf("failed to update stream %s: %w", stream.name, err)
 				}
+				a.logger.Debug("Stream updated successfully", logutil.Fields{
+					"stream": stream.name,
+				})
 			}
 		}
 	}
 
+	a.logger.Info("JetStream streams setup completed")
 	return nil
 }
 
 // needsUpdate checks if a stream configuration needs updating
-func needsUpdate(existing, desired nats.StreamConfig) bool {
+func (a *Adapter) needsUpdate(existing, desired nats.StreamConfig) bool {
 	return existing.MaxAge != desired.MaxAge ||
 		existing.MaxMsgs != desired.MaxMsgs ||
 		existing.MaxBytes != desired.MaxBytes ||
@@ -134,28 +229,55 @@ func needsUpdate(existing, desired nats.StreamConfig) bool {
 
 // Publish sends a message to the specified subject
 func (a *Adapter) Publish(ctx context.Context, subject string, data []byte) error {
+	a.logger.Debug("Publishing message", logutil.Fields{
+		"subject": subject,
+		"size":    len(data),
+	})
+
 	if a.js != nil {
 		// Use JetStream for persistent messaging
 		_, err := a.js.PublishAsync(subject, data)
 		if err != nil {
+			a.logger.Error("Failed to publish to JetStream", logutil.Fields{
+				"subject": subject,
+				"error":   err.Error(),
+			})
 			return fmt.Errorf("failed to publish to JetStream subject %s: %w", subject, err)
 		}
 
-		// Wait for publish acknowledgment with timeout
+		// Wait for publish acknowledgment with timeout from configuration
 		select {
 		case <-a.js.PublishAsyncComplete():
+			a.logger.Debug("Message published successfully", logutil.Fields{
+				"subject": subject,
+			})
 			return nil
 		case <-ctx.Done():
+			a.logger.Error("Publish context cancelled", logutil.Fields{
+				"subject": subject,
+				"error":   ctx.Err().Error(),
+			})
 			return fmt.Errorf("publish timeout for subject %s: %w", subject, ctx.Err())
-		case <-time.After(5 * time.Second):
+		case <-time.After(a.config.PublishTimeout):
+			a.logger.Error("Publish timeout", logutil.Fields{
+				"subject": subject,
+				"timeout": a.config.PublishTimeout,
+			})
 			return fmt.Errorf("publish timeout for subject %s", subject)
 		}
 	} else {
 		// Use core NATS for non-persistent messaging
 		err := a.conn.Publish(subject, data)
 		if err != nil {
+			a.logger.Error("Failed to publish to core NATS", logutil.Fields{
+				"subject": subject,
+				"error":   err.Error(),
+			})
 			return fmt.Errorf("failed to publish to subject %s: %w", subject, err)
 		}
+		a.logger.Debug("Message published successfully", logutil.Fields{
+			"subject": subject,
+		})
 		return nil
 	}
 }
@@ -164,6 +286,10 @@ func (a *Adapter) Publish(ctx context.Context, subject string, data []byte) erro
 func (a *Adapter) PublishJSON(ctx context.Context, subject string, obj interface{}) error {
 	data, err := json.Marshal(obj)
 	if err != nil {
+		a.logger.Error("Failed to marshal object", logutil.Fields{
+			"subject": subject,
+			"error":   err.Error(),
+		})
 		return fmt.Errorf("failed to marshal object for subject %s: %w", subject, err)
 	}
 
@@ -175,16 +301,25 @@ func (a *Adapter) Subscribe(ctx context.Context, subject string, handler ports.M
 	a.subsMutex.Lock()
 	defer a.subsMutex.Unlock()
 
+	a.logger.Info("Creating subscription", logutil.Fields{
+		"subject": subject,
+	})
+
 	// Check if already subscribed
 	if _, exists := a.subs[subject]; exists {
+		a.logger.Warn("Already subscribed to subject", logutil.Fields{
+			"subject": subject,
+		})
 		return fmt.Errorf("already subscribed to subject: %s", subject)
 	}
 
 	// Create message handler wrapper
 	msgHandler := func(msg *nats.Msg) {
 		if err := handler(ctx, msg.Subject, msg.Data); err != nil {
-			// Log error but don't fail subscription
-			fmt.Printf("Handler error for subject %s: %v\n", msg.Subject, err)
+			a.logger.Error("Message handler error", logutil.Fields{
+				"subject": msg.Subject,
+				"error":   err.Error(),
+			})
 		}
 	}
 
@@ -193,8 +328,9 @@ func (a *Adapter) Subscribe(ctx context.Context, subject string, handler ports.M
 
 	if a.js != nil {
 		// Use JetStream subscription for durability
+		durableName := fmt.Sprintf("%s_%s", constants.ServiceName, sanitizeSubjectForDurable(subject))
 		sub, err = a.js.Subscribe(subject, msgHandler,
-			nats.Durable(fmt.Sprintf("hexarag_%s", sanitizeSubjectForDurable(subject))),
+			nats.Durable(durableName),
 			nats.DeliverAll(),
 			nats.AckExplicit(),
 		)

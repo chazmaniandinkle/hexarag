@@ -3,7 +3,7 @@ package ports
 import (
 	"context"
 
-	"github.com/username/hexarag/internal/domain/entities"
+	"hexarag/internal/domain/entities"
 )
 
 // StoragePort defines the interface for persistent storage operations

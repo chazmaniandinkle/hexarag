@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/username/hexarag/internal/adapters/llm/ollama"
-	"github.com/username/hexarag/internal/domain/ports"
+	"hexarag/internal/adapters/llm/ollama"
+	"hexarag/internal/domain/ports"
 )
 
 // OllamaClientInterface defines the interface for Ollama client operations

@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os/exec"
@@ -10,53 +11,46 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/username/hexarag/internal/adapters/llm/ollama"
-	"github.com/username/hexarag/internal/domain/entities"
-	"github.com/username/hexarag/internal/domain/ports"
-	"github.com/username/hexarag/internal/domain/services"
-	"github.com/username/hexarag/internal/domain/metrics"
-	"github.com/username/hexarag/internal/adapters/websocket"
+	"hexarag/internal/adapters/llm/ollama"
+	"hexarag/internal/adapters/websocket"
+	"hexarag/internal/domain/entities"
+	"hexarag/internal/domain/metrics"
+	"hexarag/internal/domain/ports"
+	"hexarag/internal/domain/services"
+	"hexarag/internal/pkg/httputil"
 )
 
 // APIHandlers contains all HTTP API handlers
 type APIHandlers struct {
-	storage            ports.StoragePort
-	messaging          ports.MessagingPort
-	contextConstructor *services.ContextConstructor
-	inferenceEngine    *services.InferenceEngine
-	modelManager       *services.ModelManager
-	metricsCollector   *metrics.Collector
-	wsHub              *websocket.Hub
+	storage                 ports.StoragePort
+	messaging               ports.MessagingPort
+	contextConstructor      *services.ContextConstructor
+	inferenceEngine         *services.InferenceEngine
+	messageFlowOrchestrator *services.MessageFlowOrchestrator
+	modelManager            *services.ModelManager
+	metricsCollector        *metrics.Collector
+	wsHub                   *websocket.Hub
 }
 
 // NewAPIHandlers creates a new API handlers instance
-func NewAPIHandlers(storage ports.StoragePort, messaging ports.MessagingPort, cc *services.ContextConstructor, ie *services.InferenceEngine, mm *services.ModelManager, mc *metrics.Collector, hub *websocket.Hub) *APIHandlers {
+func NewAPIHandlers(storage ports.StoragePort, messaging ports.MessagingPort, cc *services.ContextConstructor, ie *services.InferenceEngine, mfo *services.MessageFlowOrchestrator, mm *services.ModelManager, mc *metrics.Collector, hub *websocket.Hub) *APIHandlers {
 	return &APIHandlers{
-		storage:            storage,
-		messaging:          messaging,
-		contextConstructor: cc,
-		inferenceEngine:    ie,
-		modelManager:       mm,
-		metricsCollector:   mc,
-		wsHub:              hub,
+		storage:                 storage,
+		messaging:               messaging,
+		contextConstructor:      cc,
+		inferenceEngine:         ie,
+		messageFlowOrchestrator: mfo,
+		modelManager:            mm,
+		metricsCollector:        mc,
+		wsHub:                   hub,
 	}
 }
 
 // SetupRoutes configures all API routes
 func (h *APIHandlers) SetupRoutes(r *gin.Engine) {
-	// Enable CORS
-	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	})
+	// Setup middleware
+	r.Use(httputil.CORSMiddleware(httputil.DefaultMiddlewareConfig))
+	r.Use(httputil.TimeoutMiddleware(httputil.DefaultTimeouts))
 
 	// Health check
 	r.GET("/health", h.handleHealth)
@@ -85,7 +79,8 @@ func (h *APIHandlers) SetupRoutes(r *gin.Engine) {
 		// Analysis and insights
 		api.GET("/conversations/:id/analysis", h.analyzeConversation)
 		api.GET("/inference/status", h.getInferenceStatus)
-		
+		api.GET("/orchestrator/status", h.getOrchestratorStatus)
+
 		// Model management
 		api.GET("/models", h.listModels)
 		api.POST("/models/pull", h.pullModel)
@@ -123,13 +118,13 @@ func (h *APIHandlers) handleHealth(c *gin.Context) {
 	}
 
 	// Check storage connectivity
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := httputil.WithOperationContext(c, "storage")
 	defer cancel()
 
 	if err := h.storage.Ping(ctx); err != nil {
 		status["storage"] = "error"
 		status["storage_error"] = err.Error()
-		c.JSON(http.StatusServiceUnavailable, status)
+		httputil.ServiceUnavailableError(c, err)
 		return
 	}
 	status["storage"] = "ok"
@@ -138,46 +133,35 @@ func (h *APIHandlers) handleHealth(c *gin.Context) {
 	if err := h.messaging.Ping(); err != nil {
 		status["messaging"] = "error"
 		status["messaging_error"] = err.Error()
-		c.JSON(http.StatusServiceUnavailable, status)
+		httputil.ServiceUnavailableError(c, err)
 		return
 	}
 	status["messaging"] = "ok"
 
-	c.JSON(http.StatusOK, status)
+	httputil.SuccessResponse(c, status)
 }
 
 // Conversation handlers
 
 func (h *APIHandlers) listConversations(c *gin.Context) {
-	limit := 20
-	offset := 0
+	// Parse pagination parameters using utility
+	pagination := httputil.ParsePaginationParams(c)
 
-	if l := c.Query("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	if o := c.Query("offset"); o != "" {
-		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
-			offset = parsed
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := httputil.WithOperationContext(c, "storage")
 	defer cancel()
 
-	conversations, err := h.storage.GetConversations(ctx, limit, offset)
+	conversations, err := h.storage.GetConversations(ctx, pagination.Limit, pagination.Offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httputil.InternalServerError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"conversations": conversations,
-		"limit":         limit,
-		"offset":        offset,
-	})
+	meta := map[string]interface{}{
+		"limit":  pagination.Limit,
+		"offset": pagination.Offset,
+	}
+
+	httputil.SuccessResponseWithMeta(c, gin.H{"conversations": conversations}, meta)
 }
 
 func (h *APIHandlers) createConversation(c *gin.Context) {
@@ -187,7 +171,7 @@ func (h *APIHandlers) createConversation(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httputil.BadRequestError(c, err)
 		return
 	}
 
@@ -198,30 +182,34 @@ func (h *APIHandlers) createConversation(c *gin.Context) {
 
 	conversation := entities.NewConversation(req.Title, req.SystemPromptID)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := httputil.WithOperationContext(c, "storage")
 	defer cancel()
 
 	if err := h.storage.SaveConversation(ctx, conversation); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httputil.InternalServerError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusCreated, conversation)
+	httputil.CreatedResponse(c, conversation)
 }
 
 func (h *APIHandlers) getConversation(c *gin.Context) {
-	id := c.Param("id")
+	id, err := httputil.RequiredParam(c, "id")
+	if err != nil {
+		httputil.BadRequestError(c, err)
+		return
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := httputil.WithOperationContext(c, "storage")
 	defer cancel()
 
 	conversation, err := h.storage.GetConversation(ctx, id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
+		httputil.NotFoundError(c, fmt.Errorf("conversation not found"))
 		return
 	}
 
-	c.JSON(http.StatusOK, conversation)
+	httputil.SuccessResponse(c, conversation)
 }
 
 func (h *APIHandlers) updateConversation(c *gin.Context) {
@@ -496,6 +484,19 @@ func (h *APIHandlers) getInferenceStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, status)
 }
 
+func (h *APIHandlers) getOrchestratorStatus(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	status, err := h.messageFlowOrchestrator.GetFlowStatus(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
+}
+
 // Model management handlers
 
 func (h *APIHandlers) listModels(c *gin.Context) {
@@ -529,13 +530,13 @@ func (h *APIHandlers) pullModel(c *gin.Context) {
 		progressFn := func(progress ollama.PullProgress) {
 			// Broadcast progress via messaging system
 			progressMsg := map[string]interface{}{
-				"type":        "model_pull_progress",
-				"model":       req.Model,
-				"status":      progress.Status,
-				"completed":   progress.Completed,
-				"total":       progress.Total,
-				"percent":     0,
-				"timestamp":   time.Now(),
+				"type":      "model_pull_progress",
+				"model":     req.Model,
+				"status":    progress.Status,
+				"completed": progress.Completed,
+				"total":     progress.Total,
+				"percent":   0,
+				"timestamp": time.Now(),
 			}
 
 			if progress.Total > 0 {
@@ -568,7 +569,7 @@ func (h *APIHandlers) pullModel(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusAccepted, gin.H{
-		"status":  "pulling", 
+		"status":  "pulling",
 		"model":   req.Model,
 		"message": "Model download started",
 	})
@@ -635,9 +636,9 @@ func (h *APIHandlers) switchModel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":   "switched",
-		"model":    req.Model,
-		"message":  "Model switched successfully",
+		"status":  "switched",
+		"model":   req.Model,
+		"message": "Model switched successfully",
 	})
 }
 
@@ -692,15 +693,15 @@ func (h *APIHandlers) getSystemHealth(c *gin.Context) {
 	defer cancel()
 
 	health := gin.H{
-		"api":      "healthy",
-		"ollama":   "unknown",
-		"nats":     "unknown", 
-		"database": "unknown",
-		"uptime":   0,
-		"memory_usage": "--",
-		"cpu_usage": "--",
+		"api":                 "healthy",
+		"ollama":              "unknown",
+		"nats":                "unknown",
+		"database":            "unknown",
+		"uptime":              0,
+		"memory_usage":        "--",
+		"cpu_usage":           "--",
 		"requests_per_minute": 0,
-		"timestamp": time.Now(),
+		"timestamp":           time.Now(),
 	}
 
 	// Check storage connectivity
@@ -735,10 +736,10 @@ func (h *APIHandlers) getSystemMetrics(c *gin.Context) {
 		"avg_response_time": 250,
 		"p95_response_time": 500,
 		"p99_response_time": 800,
-		"response_times": []int{200, 180, 250, 300, 220, 190, 280, 260, 240, 210},
+		"response_times":    []int{200, 180, 250, 300, 220, 190, 280, 260, 240, 210},
 		"message_flow": gin.H{
-			"sent": 150,
-			"received": 145,
+			"sent":       150,
+			"received":   145,
 			"processing": 5,
 		},
 		"timestamp": time.Now(),
@@ -756,13 +757,13 @@ func (h *APIHandlers) getSystemMetrics(c *gin.Context) {
 
 func (h *APIHandlers) getSystemConnections(c *gin.Context) {
 	stats := h.wsHub.GetStats()
-	
+
 	connections := gin.H{
-		"websocket": stats["total_connections"],
+		"websocket":            stats["total_connections"],
 		"active_conversations": 0, // TODO: Implement conversation tracking
-		"details": []gin.H{},
-		"rooms": stats["rooms"],
-		"timestamp": time.Now(),
+		"details":              []gin.H{},
+		"rooms":                stats["rooms"],
+		"timestamp":            time.Now(),
 	}
 
 	c.JSON(http.StatusOK, connections)

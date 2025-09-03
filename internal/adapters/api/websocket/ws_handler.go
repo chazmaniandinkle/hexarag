@@ -13,7 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
-	"github.com/username/hexarag/internal/domain/ports"
+	"hexarag/internal/domain/ports"
 )
 
 // Hub manages all WebSocket connections

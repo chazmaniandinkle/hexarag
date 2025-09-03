@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/username/hexarag/internal/adapters/storage/sqlite"
-	"github.com/username/hexarag/pkg/config"
+	"hexarag/internal/adapters/storage/sqlite"
+	"hexarag/pkg/config"
 )
 
 func main() {

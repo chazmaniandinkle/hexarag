@@ -9,9 +9,10 @@ import (
 
 	"github.com/sashabaranov/go-openai"
 
-	"github.com/username/hexarag/internal/domain/entities"
-	"github.com/username/hexarag/internal/domain/ports"
-	"github.com/username/hexarag/internal/domain/services"
+	"hexarag/internal/domain/entities"
+	"hexarag/internal/domain/ports"
+	"hexarag/internal/domain/services"
+	"hexarag/internal/pkg/logutil"
 )
 
 // Adapter implements the LLMPort interface using OpenAI-compatible APIs
@@ -21,33 +22,61 @@ type Adapter struct {
 	baseURL      string
 	provider     string
 	modelManager *services.ModelManager
+	logger       *logutil.FieldLogger
 }
 
 // NewAdapter creates a new OpenAI-compatible LLM adapter
 func NewAdapter(baseURL, apiKey, model, provider string, modelManager *services.ModelManager) (*Adapter, error) {
+	// Create logger for this adapter
+	logger := logutil.NewDefaultLogger().WithFields(logutil.Fields{
+		"component": "openai_adapter",
+		"provider":  provider,
+		"model":     model,
+		"base_url":  baseURL,
+	})
+
+	logger.Info("Initializing OpenAI-compatible LLM adapter")
+
 	config := openai.DefaultConfig(apiKey)
 
 	// Override base URL for local providers like Ollama/LM Studio
 	if baseURL != "" {
 		config.BaseURL = strings.TrimSuffix(baseURL, "/")
+		logger.Debug("Using custom base URL", logutil.Fields{
+			"base_url": config.BaseURL,
+		})
 	}
 
 	client := openai.NewClientWithConfig(config)
 
-	return &Adapter{
+	adapter := &Adapter{
 		client:       client,
 		model:        model,
 		baseURL:      baseURL,
 		provider:     provider,
 		modelManager: modelManager,
-	}, nil
+		logger:       logger,
+	}
+
+	logger.Info("OpenAI-compatible LLM adapter initialized successfully")
+	return adapter, nil
 }
 
 // Complete generates a completion for the given messages
 func (a *Adapter) Complete(ctx context.Context, request *ports.CompletionRequest) (*ports.CompletionResponse, error) {
+	a.logger.Debug("Starting completion request", logutil.Fields{
+		"model":         request.Model,
+		"message_count": len(request.Messages),
+		"max_tokens":    request.MaxTokens,
+	})
+
 	// Select and validate the model
 	selectedModel := a.selectModel(request.Model)
 	if err := a.validateModel(ctx, selectedModel); err != nil {
+		a.logger.Error("Model validation failed", logutil.Fields{
+			"model": selectedModel,
+			"error": err.Error(),
+		})
 		return nil, fmt.Errorf("model validation failed: %w", err)
 	}
 
@@ -69,15 +98,26 @@ func (a *Adapter) Complete(ctx context.Context, request *ports.CompletionRequest
 		if request.ToolChoice != nil {
 			req.ToolChoice = request.ToolChoice
 		}
+		a.logger.Debug("Added tools to request", logutil.Fields{
+			"tool_count": len(request.Tools),
+		})
 	}
 
 	// Make the API call
 	resp, err := a.client.CreateChatCompletion(ctx, req)
 	if err != nil {
+		a.logger.Error("Failed to create chat completion", logutil.Fields{
+			"model": selectedModel,
+			"error": err.Error(),
+		})
 		return nil, fmt.Errorf("failed to create chat completion: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
+		a.logger.Error("No choices returned from API", logutil.Fields{
+			"model":       selectedModel,
+			"response_id": resp.ID,
+		})
 		return nil, fmt.Errorf("no choices returned from API")
 	}
 
@@ -93,6 +133,9 @@ func (a *Adapter) Complete(ctx context.Context, request *ports.CompletionRequest
 	// Handle tool calls if present
 	var toolCalls []*entities.ToolCall
 	if len(choice.Message.ToolCalls) > 0 {
+		a.logger.Debug("Processing tool calls", logutil.Fields{
+			"tool_call_count": len(choice.Message.ToolCalls),
+		})
 		for _, tc := range choice.Message.ToolCalls {
 			toolCall := &entities.ToolCall{
 				ID:     tc.ID,
@@ -105,6 +148,11 @@ func (a *Adapter) Complete(ctx context.Context, request *ports.CompletionRequest
 				args := make(map[string]interface{})
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
 					toolCall.Arguments = args
+				} else {
+					a.logger.Warn("Failed to parse tool call arguments", logutil.Fields{
+						"tool_call_id": tc.ID,
+						"error":        err.Error(),
+					})
 				}
 			}
 
@@ -128,6 +176,16 @@ func (a *Adapter) Complete(ctx context.Context, request *ports.CompletionRequest
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
 		}
+		a.logger.Debug("Completion finished with usage", logutil.Fields{
+			"prompt_tokens":     resp.Usage.PromptTokens,
+			"completion_tokens": resp.Usage.CompletionTokens,
+			"total_tokens":      resp.Usage.TotalTokens,
+		})
+	} else {
+		a.logger.Debug("Completion finished successfully", logutil.Fields{
+			"response_id":   resp.ID,
+			"finish_reason": choice.FinishReason,
+		})
 	}
 
 	return response, nil

@@ -5,6 +5,10 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+
+	"hexarag/internal/pkg/configutil"
+	"hexarag/internal/pkg/constants"
+	"hexarag/internal/pkg/logutil"
 )
 
 // Config represents the application configuration
@@ -73,7 +77,7 @@ type LoggingConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Port:        8080,
+			Port:        8080, // Could use constants.DefaultServerPort if defined
 			Host:        "0.0.0.0",
 			CORSEnabled: true,
 		},
@@ -85,15 +89,15 @@ func DefaultConfig() *Config {
 			},
 		},
 		Database: DatabaseConfig{
-			Path:           "./data/hexarag.db",
-			MigrationsPath: "./internal/adapters/storage/sqlite/migrations",
+			Path:           constants.DefaultDBPath,
+			MigrationsPath: constants.DefaultMigrationsPath,
 		},
 		LLM: LLMConfig{
 			Provider:    "openai-compatible",
 			BaseURL:     "http://localhost:11434/v1",
-			Model:       "llama2",
-			MaxTokens:   4096,
-			Temperature: 0.7,
+			Model:       constants.DefaultModel,
+			MaxTokens:   constants.DefaultMaxTokens,
+			Temperature: constants.DefaultTemperature,
 		},
 		Tools: ToolsConfig{
 			MCPTimeServer: MCPTimeServerConfig{
@@ -102,14 +106,20 @@ func DefaultConfig() *Config {
 			},
 		},
 		Logging: LoggingConfig{
-			Level:  "info",
-			Format: "json",
+			Level:  constants.LogLevelInfo,
+			Format: constants.LogFormatJSON,
 		},
 	}
 }
 
 // Load loads configuration from files and environment variables
 func Load(configPath string) (*Config, error) {
+	logger := logutil.NewDefaultLogger().WithFields(logutil.Fields{
+		"component": "config_loader",
+	})
+
+	logger.Info("Loading configuration")
+
 	cfg := DefaultConfig()
 
 	v := viper.New()
@@ -117,56 +127,103 @@ func Load(configPath string) (*Config, error) {
 	// Set config file path
 	if configPath != "" {
 		v.SetConfigFile(configPath)
+		logger.Debug("Using specified config file", logutil.Fields{
+			"path": configPath,
+		})
 	} else {
 		v.SetConfigName("config")
 		v.SetConfigType("yaml")
 		v.AddConfigPath("./deployments/config")
 		v.AddConfigPath("./config")
 		v.AddConfigPath(".")
+		logger.Debug("Searching for config file in default paths")
 	}
 
-	// Environment variable support
-	v.SetEnvPrefix("HEXARAG")
+	// Environment variable support using constants
+	v.SetEnvPrefix(strings.TrimPrefix(constants.EnvPort, "HEXARAG_")) // Extract prefix
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+
+	// Bind specific environment variables using constants
+	v.BindEnv("server.port", constants.EnvPort)
+	v.BindEnv("server.host", constants.EnvHost)
+	v.BindEnv("logging.level", constants.EnvLogLevel)
+	v.BindEnv("logging.format", constants.EnvLogFormat)
+	v.BindEnv("database.path", constants.EnvDBPath)
+	v.BindEnv("nats.url", constants.EnvNATSURL)
+	v.BindEnv("llm.provider", constants.EnvLLMProvider)
+	v.BindEnv("llm.base_url", constants.EnvLLMBaseURL)
+	v.BindEnv("llm.api_key", constants.EnvLLMAPIKey)
+	v.BindEnv("llm.model", constants.EnvLLMModel)
+	v.BindEnv("debug_mode", constants.EnvDebugMode)
+	v.BindEnv("cors_enabled", constants.EnvCORSEnabled)
 
 	// Read config file
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			logger.Error("Failed to read config file", logutil.Fields{
+				"error": err.Error(),
+			})
 			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
 		// Config file not found is okay, we'll use defaults + env vars
+		logger.Info("Config file not found, using defaults and environment variables")
+	} else {
+		logger.Info("Config file loaded successfully", logutil.Fields{
+			"file": v.ConfigFileUsed(),
+		})
 	}
 
 	// Unmarshal into struct
 	if err := v.Unmarshal(cfg); err != nil {
+		logger.Error("Failed to unmarshal config", logutil.Fields{
+			"error": err.Error(),
+		})
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+
+	logger.Info("Configuration loaded successfully", logutil.Fields{
+		"server_port":  cfg.Server.Port,
+		"llm_provider": cfg.LLM.Provider,
+		"log_level":    cfg.Logging.Level,
+	})
 
 	return cfg, nil
 }
 
-// Validate checks if the configuration is valid
+// Validate checks if the configuration is valid using configutil
 func (c *Config) Validate() error {
-	if c.Server.Port <= 0 || c.Server.Port > 65535 {
-		return fmt.Errorf("invalid server port: %d", c.Server.Port)
-	}
+	return c.ValidateWithDetails()
+}
 
-	if c.Database.Path == "" {
-		return fmt.Errorf("database path cannot be empty")
-	}
+// ValidateWithDetails provides detailed validation with custom rules
+func (c *Config) ValidateWithDetails() error {
+	validator := configutil.NewValidator()
 
-	if c.LLM.BaseURL == "" {
-		return fmt.Errorf("LLM base URL cannot be empty")
-	}
+	// Server validation
+	validator.RequiredString("server.host", c.Server.Host)
+	validator.IntRange("server.port", c.Server.Port, 1, 65535)
 
-	if c.LLM.Model == "" {
-		return fmt.Errorf("LLM model cannot be empty")
-	}
+	// Database validation
+	validator.RequiredString("database.path", c.Database.Path)
+	validator.RequiredString("database.migrations_path", c.Database.MigrationsPath)
+	validator.ValidateFilePath("database.migrations_path", c.Database.MigrationsPath)
 
-	if c.NATS.URL == "" {
-		return fmt.Errorf("NATS URL cannot be empty")
-	}
+	// NATS validation
+	validator.RequiredString("nats.url", c.NATS.URL)
+	validator.ValidateURL("nats.url", c.NATS.URL)
+	validator.IntRange("nats.jetstream.retention_days", c.NATS.JetStream.RetentionDays, 1, 365)
 
-	return nil
+	// LLM validation
+	validator.RequiredString("llm.provider", c.LLM.Provider)
+	validator.RequiredString("llm.base_url", c.LLM.BaseURL)
+	validator.ValidateURL("llm.base_url", c.LLM.BaseURL)
+	validator.RequiredString("llm.model", c.LLM.Model)
+	validator.IntRange("llm.max_tokens", c.LLM.MaxTokens, 1, 100000)
+
+	// Logging validation
+	validator.OneOf("logging.level", c.Logging.Level, []string{"debug", "info", "warn", "error"})
+	validator.OneOf("logging.format", c.Logging.Format, []string{"text", "json"})
+
+	return validator.Result()
 }

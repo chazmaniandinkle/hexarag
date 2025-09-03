@@ -25,7 +25,7 @@ A hexagonal architecture-based Retrieval-Augmented Generation (RAG) conversation
 
 1. **Clone and setup:**
 ```bash
-git clone <repository-url>
+git clone https://github.com/yourusername/hexarag.git
 cd hexarag
 make deps
 ```

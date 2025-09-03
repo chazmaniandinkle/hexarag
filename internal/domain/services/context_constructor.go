@@ -7,9 +7,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/username/hexarag/internal/domain/entities"
-	"github.com/username/hexarag/internal/domain/ports"
-	"github.com/username/hexarag/pkg/tokenizer"
+	"hexarag/internal/domain/entities"
+	"hexarag/internal/domain/ports"
+	"hexarag/pkg/tokenizer"
 )
 
 // ContextConstructor is the core service responsible for building rich context for LLM inference

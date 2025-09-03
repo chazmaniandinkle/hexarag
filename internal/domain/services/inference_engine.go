@@ -7,8 +7,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/username/hexarag/internal/domain/entities"
-	"github.com/username/hexarag/internal/domain/ports"
+	"hexarag/internal/domain/entities"
+	"hexarag/internal/domain/ports"
 )
 
 // InferenceEngine orchestrates LLM inference and tool execution

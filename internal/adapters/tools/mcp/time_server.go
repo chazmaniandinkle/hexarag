@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/username/hexarag/internal/domain/ports"
+	"hexarag/internal/domain/ports"
 )
 
 // TimeServerAdapter implements a simple MCP-compatible time server

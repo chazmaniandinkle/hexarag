@@ -13,14 +13,19 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/username/hexarag/internal/domain/entities"
-	"github.com/username/hexarag/internal/domain/ports"
+	"hexarag/internal/domain/entities"
+	"hexarag/internal/domain/ports"
+	"hexarag/internal/pkg/constants"
+	"hexarag/internal/pkg/dbutil"
+	"hexarag/internal/pkg/logutil"
 )
 
 // Adapter implements the StoragePort interface using SQLite
 type Adapter struct {
 	db             *sql.DB
+	dbWrapper      *dbutil.Wrapper
 	migrationsPath string
+	logger         *logutil.FieldLogger
 }
 
 // NewAdapter creates a new SQLite storage adapter
@@ -30,14 +35,26 @@ func NewAdapter(dbPath, migrationsPath string) (*Adapter, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Configure connection pool
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(25)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	// Configure connection pool using constants
+	db.SetMaxOpenConns(constants.DatabaseMaxOpenConns)
+	db.SetMaxIdleConns(constants.DatabaseMaxIdleConns)
+	db.SetConnMaxLifetime(constants.DatabaseConnMaxLifetime)
+
+	// Create database wrapper for transaction handling
+	dbWrapper := dbutil.NewWrapper(db, constants.DatabaseTimeout)
+
+	// Create logger for this adapter
+	baseLogger := logutil.NewDefaultLogger()
+	logger := baseLogger.WithFields(logutil.Fields{
+		"component": "sqlite_adapter",
+		"database":  dbPath,
+	})
 
 	adapter := &Adapter{
 		db:             db,
+		dbWrapper:      dbWrapper,
 		migrationsPath: migrationsPath,
+		logger:         logger,
 	}
 
 	return adapter, nil
@@ -128,33 +145,50 @@ func (a *Adapter) Close() error {
 
 // Message operations
 func (a *Adapter) SaveMessage(ctx context.Context, message *entities.Message) error {
-	query := `
-		INSERT INTO messages (id, conversation_id, role, content, parent_message_id, token_count, model, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`
+	return a.dbWrapper.WithTransaction(ctx, func(tx *sql.Tx) error {
+		// Save the message
+		query := `
+			INSERT INTO messages (id, conversation_id, role, content, parent_message_id, token_count, model, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`
 
-	_, err := a.db.ExecContext(ctx, query,
-		message.ID,
-		message.ConversationID,
-		string(message.Role),
-		message.Content,
-		message.ParentID,
-		message.TokenCount,
-		message.Model,
-		message.CreatedAt,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to save message: %w", err)
-	}
-
-	// Save tool calls if present
-	for _, toolCall := range message.ToolCalls {
-		if err := a.SaveToolCall(ctx, &toolCall); err != nil {
-			return fmt.Errorf("failed to save tool call: %w", err)
+		_, err := tx.ExecContext(ctx, query,
+			message.ID,
+			message.ConversationID,
+			string(message.Role),
+			message.Content,
+			message.ParentID,
+			message.TokenCount,
+			message.Model,
+			message.CreatedAt,
+		)
+		if err != nil {
+			a.logger.Error("Failed to save message", logutil.Fields{
+				"message_id":      message.ID,
+				"conversation_id": message.ConversationID,
+				"error":           err.Error(),
+			})
+			return fmt.Errorf("failed to save message: %w", err)
 		}
-	}
 
-	return nil
+		// Save tool calls if present
+		for _, toolCall := range message.ToolCalls {
+			if err := a.saveToolCallInTx(ctx, tx, &toolCall); err != nil {
+				a.logger.Error("Failed to save tool call", logutil.Fields{
+					"tool_call_id": toolCall.ID,
+					"message_id":   message.ID,
+					"error":        err.Error(),
+				})
+				return fmt.Errorf("failed to save tool call: %w", err)
+			}
+		}
+
+		a.logger.Debug("Message saved successfully", logutil.Fields{
+			"message_id":      message.ID,
+			"conversation_id": message.ConversationID,
+		})
+		return nil
+	})
 }
 
 func (a *Adapter) GetMessage(ctx context.Context, id string) (*entities.Message, error) {
@@ -181,8 +215,15 @@ func (a *Adapter) GetMessage(ctx context.Context, id string) (*entities.Message,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("message not found: %s", id)
+			a.logger.Warn("Message not found", logutil.Fields{
+				"message_id": id,
+			})
+			return nil, fmt.Errorf("%s: %s", constants.ErrMsgMessageNotFound, id)
 		}
+		a.logger.Error("Failed to get message", logutil.Fields{
+			"message_id": id,
+			"error":      err.Error(),
+		})
 		return nil, fmt.Errorf("failed to get message: %w", err)
 	}
 
@@ -196,6 +237,10 @@ func (a *Adapter) GetMessage(ctx context.Context, id string) (*entities.Message,
 	// Load tool calls
 	toolCalls, err := a.GetToolCallsForMessage(ctx, id)
 	if err != nil {
+		a.logger.Error("Failed to load tool calls for message", logutil.Fields{
+			"message_id": id,
+			"error":      err.Error(),
+		})
 		return nil, fmt.Errorf("failed to load tool calls: %w", err)
 	}
 
@@ -203,7 +248,44 @@ func (a *Adapter) GetMessage(ctx context.Context, id string) (*entities.Message,
 		message.ToolCalls = append(message.ToolCalls, *tc)
 	}
 
+	a.logger.Debug("Message retrieved successfully", logutil.Fields{
+		"message_id":      id,
+		"conversation_id": message.ConversationID,
+	})
 	return &message, nil
+}
+
+// saveToolCallInTx saves a tool call within an existing transaction
+func (a *Adapter) saveToolCallInTx(ctx context.Context, tx *sql.Tx, toolCall *entities.ToolCall) error {
+	argumentsJSON, err := toolCall.ArgumentsJSON()
+	if err != nil {
+		return fmt.Errorf("failed to marshal tool call arguments: %w", err)
+	}
+
+	resultJSON, err := toolCall.ResultJSON()
+	if err != nil {
+		return fmt.Errorf("failed to marshal tool call result: %w", err)
+	}
+
+	query := `
+		INSERT INTO tool_calls (id, message_id, tool_name, arguments, result, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`
+
+	_, err = tx.ExecContext(ctx, query,
+		toolCall.ID,
+		toolCall.MessageID,
+		toolCall.Name,
+		argumentsJSON,
+		resultJSON,
+		string(toolCall.Status),
+		toolCall.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to save tool call: %w", err)
+	}
+
+	return nil
 }
 
 func (a *Adapter) GetMessages(ctx context.Context, conversationID string, limit int) ([]*entities.Message, error) {
@@ -335,23 +417,34 @@ func (a *Adapter) GetMessagesAfter(ctx context.Context, conversationID string, a
 
 // Conversation operations
 func (a *Adapter) SaveConversation(ctx context.Context, conversation *entities.Conversation) error {
-	query := `
-		INSERT INTO conversations (id, title, system_prompt_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
-	`
+	return a.dbWrapper.WithTransaction(ctx, func(tx *sql.Tx) error {
+		query := `
+			INSERT INTO conversations (id, title, system_prompt_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+		`
 
-	_, err := a.db.ExecContext(ctx, query,
-		conversation.ID,
-		conversation.Title,
-		conversation.SystemPromptID,
-		conversation.CreatedAt,
-		conversation.UpdatedAt,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to save conversation: %w", err)
-	}
+		_, err := tx.ExecContext(ctx, query,
+			conversation.ID,
+			conversation.Title,
+			conversation.SystemPromptID,
+			conversation.CreatedAt,
+			conversation.UpdatedAt,
+		)
+		if err != nil {
+			a.logger.Error("Failed to save conversation", logutil.Fields{
+				"conversation_id": conversation.ID,
+				"title":           conversation.Title,
+				"error":           err.Error(),
+			})
+			return fmt.Errorf("failed to save conversation: %w", err)
+		}
 
-	return nil
+		a.logger.Debug("Conversation saved successfully", logutil.Fields{
+			"conversation_id": conversation.ID,
+			"title":           conversation.Title,
+		})
+		return nil
+	})
 }
 
 func (a *Adapter) GetConversation(ctx context.Context, id string) (*entities.Conversation, error) {
@@ -374,8 +467,15 @@ func (a *Adapter) GetConversation(ctx context.Context, id string) (*entities.Con
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("conversation not found: %s", id)
+			a.logger.Warn("Conversation not found", logutil.Fields{
+				"conversation_id": id,
+			})
+			return nil, fmt.Errorf("%s: %s", constants.ErrMsgConversationNotFound, id)
 		}
+		a.logger.Error("Failed to get conversation", logutil.Fields{
+			"conversation_id": id,
+			"error":           err.Error(),
+		})
 		return nil, fmt.Errorf("failed to get conversation: %w", err)
 	}
 
@@ -387,6 +487,10 @@ func (a *Adapter) GetConversation(ctx context.Context, id string) (*entities.Con
 	messageRows, err := a.db.QueryContext(ctx,
 		"SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at ASC", id)
 	if err != nil {
+		a.logger.Error("Failed to load message IDs", logutil.Fields{
+			"conversation_id": id,
+			"error":           err.Error(),
+		})
 		return nil, fmt.Errorf("failed to load message IDs: %w", err)
 	}
 	defer messageRows.Close()
@@ -394,15 +498,34 @@ func (a *Adapter) GetConversation(ctx context.Context, id string) (*entities.Con
 	for messageRows.Next() {
 		var messageID string
 		if err := messageRows.Scan(&messageID); err != nil {
+			a.logger.Error("Failed to scan message ID", logutil.Fields{
+				"conversation_id": id,
+				"error":           err.Error(),
+			})
 			return nil, fmt.Errorf("failed to scan message ID: %w", err)
 		}
 		conversation.MessageIDs = append(conversation.MessageIDs, messageID)
 	}
 
+	a.logger.Debug("Conversation retrieved successfully", logutil.Fields{
+		"conversation_id": id,
+		"message_count":   len(conversation.MessageIDs),
+	})
 	return &conversation, nil
 }
 
 func (a *Adapter) GetConversations(ctx context.Context, limit int, offset int) ([]*entities.Conversation, error) {
+	// Apply default limits if needed
+	if limit <= 0 {
+		limit = constants.DefaultQueryLimit
+	}
+	if limit > constants.MaxQueryLimit {
+		limit = constants.MaxQueryLimit
+	}
+	if offset < 0 {
+		offset = constants.DefaultQueryOffset
+	}
+
 	query := `
 		SELECT id, title, system_prompt_id, created_at, updated_at
 		FROM conversations 
@@ -412,6 +535,11 @@ func (a *Adapter) GetConversations(ctx context.Context, limit int, offset int) (
 
 	rows, err := a.db.QueryContext(ctx, query, limit, offset)
 	if err != nil {
+		a.logger.Error("Failed to get conversations", logutil.Fields{
+			"limit":  limit,
+			"offset": offset,
+			"error":  err.Error(),
+		})
 		return nil, fmt.Errorf("failed to get conversations: %w", err)
 	}
 	defer rows.Close()
@@ -429,6 +557,9 @@ func (a *Adapter) GetConversations(ctx context.Context, limit int, offset int) (
 			&conversation.UpdatedAt,
 		)
 		if err != nil {
+			a.logger.Error("Failed to scan conversation", logutil.Fields{
+				"error": err.Error(),
+			})
 			return nil, fmt.Errorf("failed to scan conversation: %w", err)
 		}
 
@@ -444,6 +575,10 @@ func (a *Adapter) GetConversations(ctx context.Context, limit int, offset int) (
 		messageRows, err := a.db.QueryContext(ctx,
 			"SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at ASC", conv.ID)
 		if err != nil {
+			a.logger.Error("Failed to load message IDs", logutil.Fields{
+				"conversation_id": conv.ID,
+				"error":           err.Error(),
+			})
 			return nil, fmt.Errorf("failed to load message IDs for conversation %s: %w", conv.ID, err)
 		}
 
@@ -451,6 +586,10 @@ func (a *Adapter) GetConversations(ctx context.Context, limit int, offset int) (
 			var messageID string
 			if err := messageRows.Scan(&messageID); err != nil {
 				messageRows.Close()
+				a.logger.Error("Failed to scan message ID", logutil.Fields{
+					"conversation_id": conv.ID,
+					"error":           err.Error(),
+				})
 				return nil, fmt.Errorf("failed to scan message ID: %w", err)
 			}
 			conv.MessageIDs = append(conv.MessageIDs, messageID)
@@ -458,6 +597,11 @@ func (a *Adapter) GetConversations(ctx context.Context, limit int, offset int) (
 		messageRows.Close()
 	}
 
+	a.logger.Debug("Conversations retrieved successfully", logutil.Fields{
+		"count":  len(conversations),
+		"limit":  limit,
+		"offset": offset,
+	})
 	return conversations, nil
 }
 
@@ -533,11 +677,22 @@ func (a *Adapter) GetSystemPrompt(ctx context.Context, id string) (*entities.Sys
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("system prompt not found: %s", id)
+			a.logger.Warn("System prompt not found", logutil.Fields{
+				"prompt_id": id,
+			})
+			return nil, fmt.Errorf("%s: %s", constants.ErrMsgSystemPromptNotFound, id)
 		}
+		a.logger.Error("Failed to get system prompt", logutil.Fields{
+			"prompt_id": id,
+			"error":     err.Error(),
+		})
 		return nil, fmt.Errorf("failed to get system prompt: %w", err)
 	}
 
+	a.logger.Debug("System prompt retrieved successfully", logutil.Fields{
+		"prompt_id": id,
+		"name":      prompt.Name,
+	})
 	return &prompt, nil
 }
 
